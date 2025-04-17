@@ -1,0 +1,11 @@
+device: 0 
+num_workers: 4
+ext: "ndpi"
+encoder: "hoptimus1"
+target_mag: 20
+patch_size: 224
+overlap: 0 
+seg_down: 32
+seg_tolerence: 0.5
+batch_max: 128
+

@@ -1,0 +1,17 @@
+n_tiles: 300
+sampler: random_strict
+ref_metric: roc_auc
+criterion: nll
+optimizer: adam
+model: mhmc_layers
+atn_dim: 256
+num_heads: 16
+feature_depth: 1536
+n_layers_classif: 3
+dropout: 0.4
+batch_size: 16
+epochs: 1
+patience: 1
+lr: 0.003
+lr_scheduler: cos
+patience_lr: 50
