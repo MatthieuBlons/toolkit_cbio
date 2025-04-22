@@ -31,6 +31,13 @@ def map_cell_feat(
     if isinstance(slide, str):
         reader = get_slide_reader(slide)
         slide = reader(slide)
+
+    if res_to_view > slide.level_count:
+        print(
+            f"downsampling level={res_to_view} is not accessible, use level={slide.level_count-1} instead"
+        )
+        res_to_view = slide.level_count - 1
+
     dim_at_analyse_level = slide.level_dimensions[analyse_level]
     down_at_analyse_level = slide.level_downsamples[analyse_level]
     wsi = slide.read_region((0, 0), res_to_view, slide.level_dimensions[res_to_view])
@@ -157,6 +164,13 @@ def visualise_tile_feat(
     if isinstance(slide, str):
         reader = get_slide_reader(slide)
         slide = reader(slide)
+
+    if res_to_view > slide.level_count:
+        print(
+            f"downsampling level={res_to_view} is not accessible, use level={slide.level_count-1} instead"
+        )
+        res_to_view = slide.level_count - 1
+
     dim_at_analyse_level = slide.level_dimensions[analyse_level]
     down_at_analyse_level = slide.level_downsamples[analyse_level]
     wsi = slide.read_region((0, 0), res_to_view, slide.level_dimensions[res_to_view])
@@ -233,6 +247,13 @@ def visualise_cut(
     if isinstance(slide, str):
         reader = get_slide_reader(slide)
         slide = reader(slide)
+
+    if res_to_view > slide.level_count:
+        print(
+            f"downsampling level={res_to_view} is not accessible, use level={slide.level_count-1} instead"
+        )
+        res_to_view = slide.level_count - 1
+
     dim_at_analyse_level = slide.level_dimensions[analyse_level]
     down_at_analyse_level = slide.level_downsamples[analyse_level]
     wsi = slide.read_region((0, 0), res_to_view, slide.level_dimensions[res_to_view])
