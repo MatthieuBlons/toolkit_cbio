@@ -51,8 +51,18 @@ def mosaic(imlist, size=None, max_img=None, ax=None):
                             :,
                         ] = np_img[:, :, :]
                         gridpos += 1
+                elif isinstance(imlist[0], np.ndarray):
+                    np_img = imlist[gridpos]
+                    grid[
+                        x * size[0] : (x + 1) * size[0],
+                        y * size[1] : (y + 1) * size[1],
+                        :,
+                    ] = np_img[:, :, :]
+                    gridpos += 1
                 else:
-                    raise TypeError("imlist should be a list of str")
+                    raise TypeError(
+                        "imlist should be a list of str or list of ndarrays"
+                    )
     # show image
     ax.imshow(grid)
 
