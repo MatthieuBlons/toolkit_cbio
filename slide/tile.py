@@ -45,17 +45,21 @@ class SlidePatcher:
             self.mag_0 = slide.magnification
         self.mag_target = mag_target
         downsample = self.mag_0 / self.mag_target
-        self.level_target = self.slide.get_best_level_for_downsample(downsample)
-        self.downsample = self.get_true_downsample(self.level_target)
+
         self.pixel_size_0 = pixel_size_0
         if not pixel_size_0:
             self.pixel_size_0 = slide.mpp
+
         self.pixel_size_target = pixel_size_target
         if not pixel_size_target:
-            self.pixel_size_target = self.pixel_size_0 * self.downsample
-        self.patch_size_0 = round(self.patch_size_target * self.downsample)
+            self.pixel_size_target = self.pixel_size_0 * downsample
+
+        self.level, self.downsample_level, self.resize_factor = (
+            self.slide.get_best_level_for_downsample(downsample)
+        )
+        self.patch_size_level = round(self.patch_size_target / self.resize_factor)
         self.overlap_target = overlap
-        self.overlap_0 = round(self.overlap_target * self.downsample)
+        self.overlap_level = round(self.overlap_target / self.resize_factor)
         self.mask_downsample = mask_downsample
         self.mask_tolerance = mask_tolerance
         self.custom_xywh = custom_xywh
@@ -86,7 +90,7 @@ class SlidePatcher:
             x, y, w, h = self.valid_patches[index]
             if self.xywh_only:
                 return (x, y, w, h)
-            tile, (x, y, w, h) = self.get_tile(x, y, w, h)
+            tile = self.get_tile(x, y, w, h)
             return tile, (x, y, w, h)
         else:
             raise IndexError("Index out of range")
@@ -107,18 +111,12 @@ class SlidePatcher:
             self.patch_path = self.save_patch(self.dst, self.save_as)
         return 0
 
-    def get_true_downsample(self, level):
-        dim_0 = self.slide.dimensions
-        dim_level = self.slide.level_dimensions[level]
-        down_x, down_y = (dim_0[0] / dim_level[0], dim_0[1] / dim_level[1])
-        return max(down_x, down_y)
-
     def get_seg_mask(self, margin: tuple | None = (32, 32)):
         if not self.mask_downsample:
             self.mask_downsample = 1.0
-            self.level_mask = self.level_target
+            self.level_mask = self.level
         else:
-            self.level_mask = self.slide.get_best_level_for_downsample(
+            self.level_mask, _, _ = self.slide.get_best_level_for_downsample(
                 self.mask_downsample
             )
 
@@ -141,8 +139,8 @@ class SlidePatcher:
         point_end_mask = max_row, max_col
 
         shape_at_level = (
-            self.slide.level_dimensions[self.level_target][1],
-            self.slide.level_dimensions[self.level_target][0],
+            self.slide.level_dimensions[self.level][1],
+            self.slide.level_dimensions[self.level][0],
         )
         point_start = get_x_y_to(point_start_mask, mask.shape, shape_at_level)
         point_end = get_x_y_to(point_end_mask, mask.shape, shape_at_level)
@@ -150,8 +148,8 @@ class SlidePatcher:
         # does overlapping works well
         # during init check is patch_shape_no_margin != (0, 0) -> 2 * overlap_target < patch_size_target -> in that case no marging
         patch_shape_no_margin = (
-            self.patch_size_target - self.overlap_target,
-            self.patch_size_target - self.overlap_target,
+            self.patch_size_level - self.overlap_level,
+            self.patch_size_level - self.overlap_level,
         )
         grid_coord = grid_blob(point_start, point_end, patch_shape_no_margin)
 
@@ -159,13 +157,14 @@ class SlidePatcher:
 
     def get_valid_patches(self, mask, grid_coord):
         shape_at_level = (
-            self.slide.level_dimensions[self.level_target][1],
-            self.slide.level_dimensions[self.level_target][0],
+            self.slide.level_dimensions[self.level][1],
+            self.slide.level_dimensions[self.level][0],
         )
         shape_mask = mask.shape
         patches_at_level = []
+
         patch_size_mask = get_size_to(
-            (self.patch_size_target, 0), self.level_target, self.level_mask
+            (self.patch_size_level, 0), self.downsample_level, self.mask_downsample
         )[0]
         radius = np.array([max(patch_size_mask // 2, 1), max(patch_size_mask // 2, 1)])
         for coord in grid_coord:
@@ -183,8 +182,8 @@ class SlidePatcher:
                     valid_patch = [
                         coord[1],
                         coord[0],
-                        self.patch_size_target,
-                        self.patch_size_target,
+                        self.patch_size_level,
+                        self.patch_size_level,
                     ]
                     patches_at_level.append(valid_patch)  # x, y, w, h
         nb_valid_patches = len(patches_at_level)
@@ -193,13 +192,20 @@ class SlidePatcher:
     def get_tile(self, x, y, w, h):
         if self.pil:
             tile = self.slide.read_region(
-                location=(x, y), level=self.level_target, size=(w, h), numpy=False
+                location=(x, y), level=self.level, size=(w, h), numpy=False
             ).convert("RGB")
+            # resize
+            tile = tile.resize((self.patch_size_target, self.patch_size_target))
         else:
             tile = self.slide.read_region(
-                location=(x, y), level=self.level_target, size=(w, h)
+                location=(x, y), level=self.level, size=(w, h), numpy=True
             )
-        return tile, (x, y, w, h)
+            # resize
+            tile = cv2.resize(tile, (self.patch_size_target, self.patch_size_target))[
+                :, :, :3
+            ]
+
+        return tile
 
     def get_thumbnail(self, size, numpy: bool = False):
         thumbnail = self.slide.get_thumbnail(size)
@@ -224,8 +230,8 @@ class SlidePatcher:
         text_x_offset = int(thumbnail_width * 0.03)
         text_y_spacing = 25  # Vertical spacing between lines of text
 
-        text_box_height = 150
-        text_box_width = 300
+        text_box_height = 120
+        text_box_width = 350
         mask[:text_box_height, :text_box_width] = (
             mask[:text_box_height, :text_box_width] * 0.25
         ).astype(np.uint8)
@@ -241,7 +247,7 @@ class SlidePatcher:
         )
         cv2.putText(
             mask,
-            f"width={self.width}, height={self.height}",
+            f"width={self.width} px, height={self.height} px",
             (text_x_offset, text_y_spacing * 2),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
@@ -283,15 +289,13 @@ class SlidePatcher:
     def visualize_cut(self, size: tuple, save_cut: str, show: bool = False):
         thumbnail = self.get_thumbnail(size, numpy=True)
         thumbnail_height, thumbnail_width, _ = thumbnail.shape
-        downsample_factor = (
-            self.slide.level_dimensions[self.level_target][0] / thumbnail_width
-        )
-        thumbnail_patch_size = max(1, int(self.patch_size_target / downsample_factor))
+        downsample_factor = self.slide.level_dimensions[self.level][0] / thumbnail_width
+        thumbnail_patch_size = max(1, int(self.patch_size_level / downsample_factor))
         # Draw rectangles for patches
         for x, y, _, _ in self.valid_patches:
             x, y = get_x_y_to(
                 (x, y),
-                self.slide.level_dimensions[self.level_target],
+                self.slide.level_dimensions[self.level],
                 (thumbnail_width, thumbnail_height),
                 integer=True,
             )
@@ -308,8 +312,8 @@ class SlidePatcher:
         text_x_offset = int(thumbnail_width * 0.03)
         text_y_spacing = 25  # Vertical spacing between lines of text
 
-        text_box_height = 150
-        text_box_width = 300
+        text_box_height = 180
+        text_box_width = 350
 
         # Define the text box color and alpha transparency
         text_box_color = (204, 139, 189)  # Dark gray
@@ -333,7 +337,7 @@ class SlidePatcher:
         )
         cv2.putText(
             thumbnail,
-            f"width={self.width}, height={self.height}",
+            f"width={self.width} px, height={self.height} px",
             (text_x_offset, text_y_spacing * 2),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
@@ -353,7 +357,7 @@ class SlidePatcher:
         )
         cv2.putText(
             thumbnail,
-            f"patch={self.patch_size_target} w. overlap={self.overlap_target} at {self.mag_target}x",
+            f"ask: patch={self.patch_size_target} w. overlap={self.overlap_target} at {self.mag_target}x",
             (text_x_offset, text_y_spacing * 4),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
@@ -363,8 +367,18 @@ class SlidePatcher:
         )
         cv2.putText(
             thumbnail,
-            f"tissue tolerence={self.mask_tolerance * 100}%",
+            f"out: patch={self.patch_size_level} w. overlap={self.overlap_level} at lvl={self.level}",
             (text_x_offset, text_y_spacing * 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            thumbnail,
+            f"tissue tolerence={self.mask_tolerance * 100}%",
+            (text_x_offset, text_y_spacing * 6),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
             (255, 255, 255),
@@ -388,15 +402,15 @@ class SlidePatcher:
         if save_as == "h5":
             coords = {"coords": np.array(self.valid_patches)}
             attributes = {
-                "patch_size": self.patch_size_target,  # Reference frame: patch_level
-                "patch_size_level0": self.patch_size_0,
+                "magnification": self.mag_0,
+                "mpp": self.pixel_size_0,
                 "target_magnification": self.mag_target,
-                "traget_level": self.level_target,
+                "target_patch_size": self.patch_size_target,
                 "target_mpp": self.pixel_size_target,
-                "level0_magnification": self.mag_0,
-                "level0_mpp": self.pixel_size_0,
-                "overlap": self.overlap_target,
-                "level0_overlap": self.overlap_0,
+                "target_overlap": self.overlap_target,
+                "level": self.level,
+                "level_patch_size": self.patch_size_level,
+                "level_overlap": self.overlap_level,
                 "tissu_thr": self.mask_tolerance,
                 "name": self.slide.name,
                 "savetodir": dst,
@@ -496,16 +510,23 @@ class TileEncoder:
 
     def get_patch_attributes(self):
         try:
-            self.patch_size = self.tile_attr.get("patch_size", None)
-            self.patch_size_0 = self.tile_attr.get("patch_size_level0", None)
+            self.mag_0 = self.tile_attr.get("magnification", None)
+            self.pixel_size_0 = self.tile_attr.get("mpp", None)
             self.mag_target = self.tile_attr.get("target_magnification", None)
-            self.mag_0 = self.tile_attr.get("level0_magnification", None)
-            self.level_target = self.tile_attr.get("traget_level", None)
-            self.overlap_target = self.tile_attr.get("overlap", None)
-            self.overlap_0 = self.tile_attr.get("level0_overlap", None)
+            self.pixel_size_target = self.tile_attr.get("target_mpp", None)
+            self.patch_size_target = self.tile_attr.get("target_patch_size", None)
+            self.overlap_target = self.tile_attr.get("target_overlap", None)
+            self.level = self.tile_attr.get("level", None)
+            self.patch_size_level = self.tile_attr.get("level_patch_size", None)
+            self.overlap_level = self.tile_attr.get("level_overlap", None)
             self.tissu_thr = self.tile_attr.get("tissu_thr", None)
             self.name = self.tile_attr.get("name", None)
-            if None in (self.patch_size, self.mag_0, self.mag_target):
+            if None in (
+                self.patch_size_target,
+                self.mag_0,
+                self.mag_target,
+                self.overlap_target,
+            ):
                 raise KeyError("Missing attributes in patch file.")
         except (KeyError, FileNotFoundError, ValueError) as e:
             warnings.warn(f"Cannot read patch file attributes ({str(e)}).")
@@ -517,9 +538,8 @@ class TileEncoder:
             slide=self.slide,
             mag_0=self.mag_0,
             mag_target=self.mag_target,
-            patch_size=self.patch_size,
+            patch_size=self.patch_size_target,
             overlap=self.overlap_target,
-            mask_tolerance=self.tissu_thr,
             custom_xywh=self.tile_coords,
             xywh_only=False,
             pil=True,
