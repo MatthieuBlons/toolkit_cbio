@@ -619,7 +619,7 @@ class TileEncoder:
             self.slide,
             clusters.obs,
             name="leiden_int",
-            analyse_level=self.level_target,
+            analyse_level=self.level,
             res_to_view=res_to_view,
             plot_args={
                 "color": None,
