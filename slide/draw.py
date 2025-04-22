@@ -32,10 +32,12 @@ def map_cell_feat(
         reader = get_slide_reader(slide)
         slide = reader(slide)
     dim_at_analyse_level = slide.level_dimensions[analyse_level]
+    down_at_analyse_level = slide.level_downsamples[analyse_level]
     wsi = slide.read_region((0, 0), res_to_view, slide.level_dimensions[res_to_view])
     if not isinstance(wsi, np.ndarray):
         wsi = np.array(wsi)[:, :, :3]
     dim_at_res_to_view = slide.level_dimensions[res_to_view]
+    down_at_res_to_view = slide.level_downsamples[res_to_view]
     ax.imshow(wsi, aspect="equal")
 
     if discrete:
@@ -59,10 +61,11 @@ def map_cell_feat(
                     dim_at_res_to_view,
                     integer=True,
                 )
+
                 w, h = get_size_to(
                     (row["w"], row["h"]),
-                    analyse_level,
-                    res_to_view,
+                    down_at_analyse_level,
+                    down_at_res_to_view,
                     integer=True,
                 )
                 plot_seed = (x, y)
@@ -101,8 +104,8 @@ def map_cell_feat(
             )
             w, h = get_size_to(
                 (row["w"], row["h"]),
-                analyse_level,
-                res_to_view,
+                down_at_analyse_level,
+                down_at_res_to_view,
                 integer=True,
             )
             plot_seed = (x, y)
@@ -155,10 +158,12 @@ def visualise_tile_feat(
         reader = get_slide_reader(slide)
         slide = reader(slide)
     dim_at_analyse_level = slide.level_dimensions[analyse_level]
+    down_at_analyse_level = slide.level_downsamples[analyse_level]
     wsi = slide.read_region((0, 0), res_to_view, slide.level_dimensions[res_to_view])
     if not isinstance(wsi, np.ndarray):
         wsi = np.array(wsi)[:, :, :3]
     dim_at_res_to_view = slide.level_dimensions[res_to_view]
+    down_at_res_to_view = slide.level_downsamples[res_to_view]
     ax.imshow(wsi, aspect="equal")
 
     list_pos = pd.Series(tile_feat.index).to_list()
@@ -180,8 +185,8 @@ def visualise_tile_feat(
         )
         width, height = get_size_to(
             (tile_feat["w"][idx], tile_feat["h"][idx]),
-            analyse_level,
-            res_to_view,
+            down_at_analyse_level,
+            down_at_res_to_view,
             integer=True,
         )
         feat = tile_feat[name][idx]
@@ -229,10 +234,12 @@ def visualise_cut(
         reader = get_slide_reader(slide)
         slide = reader(slide)
     dim_at_analyse_level = slide.level_dimensions[analyse_level]
+    down_at_analyse_level = slide.level_downsamples[analyse_level]
     wsi = slide.read_region((0, 0), res_to_view, slide.level_dimensions[res_to_view])
     if not isinstance(wsi, np.ndarray):
         wsi = np.array(wsi)[:, :, :3]
     dim_at_res_to_view = slide.level_dimensions[res_to_view]
+    down_at_res_to_view = slide.level_downsamples[res_to_view]
     if not ax:
         _, ax = plt.subplots(1, 1, figsize=plot_args["size"], layout="constrained")
     ax.imshow(wsi, aspect="equal")
@@ -241,7 +248,9 @@ def visualise_cut(
         x, y = get_x_y_to(
             (x, y), dim_at_analyse_level, dim_at_res_to_view, integer=True
         )
-        w, h = get_size_to((w, h), analyse_level, res_to_view, integer=True)
+        w, h = get_size_to(
+            (w, h), down_at_analyse_level, down_at_res_to_view, integer=True
+        )
         plot_seed = (x, y)
         patch = patches.Rectangle(
             plot_seed, w, h, fill=False, edgecolor=plot_args["color"]

@@ -185,14 +185,14 @@ def get_slide_image(slide, para, numpy=True):
 
 
 # rename get_new_size
-def get_size_to(size, level_from, level_to, integer=True):
+def get_size_to(size, downsample_from, downsample_to, integer=True):
     """
     Returns:
         A tuple, or tuple like object of size 2 with integers corresponding
         to the new size at level level_to. Or size_to.
     """
     size_x, size_y = size
-    scal = float(2**level_from / 2**level_to)
+    scal = float(downsample_from / downsample_to)
     if integer:
         func_round = round
     else:
@@ -222,27 +222,6 @@ def get_x_y_to(point, dim_from, dim_to, integer=True):
     else:
         point_l = (x_l, y_l)
     return point_l
-
-
-# rename get_xy_0
-def get_x_y_0(point, dim_from, dim_0, integer=True):
-    """
-    Returns:
-        A tuple corresponding to the converted coordinates, point_0.
-    """
-    x_l, y_l = point
-    size_x_l = float(dim_from[0])
-    size_y_l = float(dim_from[1])
-    size_x_0 = float(dim_0[0])
-    size_y_0 = float(dim_0[1])
-
-    x_0 = x_l * size_x_0 / size_x_l
-    y_0 = y_l * size_y_0 / size_y_l
-    if integer:
-        point_0 = (int(x_0), int(y_0))
-    else:
-        point_0 = (x_0, y_0)
-    return point_0
 
 
 def make_auto_mask(slide, mask_level, margin=(0, 0)):
@@ -363,6 +342,12 @@ def read_h5_coords(coords_path):
         attrs = dict(f["coords"].attrs)
         coords = f["coords"][:]
     return attrs, coords
+
+def read_h5_features(embs_path):
+    with h5py.File(embs_path, "r") as f:
+        attrs = dict(f["features"].attrs)
+        feats = f["features"][:]
+    return attrs, feats
 
 
 def read_csv_coords(coords_path):
