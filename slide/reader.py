@@ -102,11 +102,10 @@ class OpenWSI:
     def get_thumbnail(self, size: tuple = (1024, 1024)):
         return self.img.get_thumbnail(size)
 
-    def get_thumbnail(self, size: tuple = (1024, 1024)):
-        return self.img.get_thumbnail(size)
-
     def read_region(self, location: tuple, level: int, size: tuple, numpy: bool = True):
-        crop = self.img.read_region(location, level, size)
+        (x0, y0) = self.get_xy_0(location, level, integer=True)
+        # location should be a tuple giving the top left pixel in the level 0 reference frame
+        crop = self.img.read_region((x0, y0), level, size)
         if numpy:
             crop = np.array(crop)[:, :, :3]
         return crop
@@ -119,28 +118,50 @@ class OpenWSI:
             whole = np.array(whole)[:, :, :3]
         return whole
 
-    def get_best_level_for_downsample(self, downsample: float, tolerance: float = 0.01):
-        # First, check for an exact match within tolerance
+    def get_best_level_for_downsample(
+        self, ask_downsample: float, precision: float = 0.01
+    ):
         level_downsamples = self.level_downsamples
-
-        for level, level_downsample in enumerate(level_downsamples):
-            if abs(level_downsample - downsample) <= tolerance:
-                return level  # Exact match, no custom downsampling needed
-
-        if downsample >= level_downsamples[0]:
+        # First, check for a close match
+        for level_best, level_downsample in enumerate(level_downsamples):
+            if abs(level_downsample - ask_downsample) <= precision:
+                return (
+                    level_best,
+                    level_downsample,
+                    1,
+                )  # Exact match, no custom downsampling needed
+        # If not,
+        if ask_downsample >= level_downsamples[0]:
             # Downsampling: find the highest level_downsample less than or equal to the desired downsample
-            closest_level = None
+            level_best = None
             for level, level_downsample in enumerate(level_downsamples):
-                if level_downsample <= downsample:
-                    closest_level = level
+                if level_downsample <= ask_downsample:
+                    level_best = level
+                    resize_factor = level_downsample / ask_downsample
                 else:
-                    break  # Since level_downsamples are sorted, no need to check further
-            if closest_level is not None:
-                return closest_level
+                    break  # level_downsamples are sorted, no need to check further
+            if level_best is not None:
+                return level_best, level_downsample, resize_factor
         else:
             # Upsampling: find the smallest level_downsample greater than or equal to the desired downsample
             for level, level_downsample in enumerate(level_downsamples):
-                if level_downsample >= downsample:
-                    return level
+                if level_downsample >= ask_downsample:
+                    resize_factor = ask_downsample / level_downsample
+                    return level, level_downsample, resize_factor
+
         # If no suitable level is found, raise an error
-        raise ValueError(f"No level found for downsample {downsample}.")
+        raise ValueError(f"No level found for downsample {ask_downsample}.")
+
+    def get_xy_0(self, point, level, integer=True):
+        """
+        Returns:
+            A tuple corresponding to the converted coordinates, point_0.
+        """
+        x, y = point
+        x_0 = x * self.dimensions[0] / self.level_dimensions[level][0]
+        y_0 = y * self.dimensions[1] / self.level_dimensions[level][1]
+        if integer:
+            point_0 = (int(x_0), int(y_0))
+        else:
+            point_0 = (x_0, y_0)
+        return point_0
