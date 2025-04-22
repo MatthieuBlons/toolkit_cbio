@@ -5,9 +5,9 @@ from slide.utils import get_slide_reader, print_attrs, print_dict
 import torch
 from slide.load import encoder_factory
 import h5py
-
+import yaml
 import warnings
-
+from dtime.trackers import timetracker
 warnings.filterwarnings("ignore")
 
 
@@ -99,7 +99,21 @@ def parse_arguments():
     )
 
     parser.add_argument(
+        "--config",
+        type=str,
+        default="./config_default.yaml",
+        help="Config file for lazy args passing",
+    )
+
+    parser.add_argument(
         "--tqdm", action="store_true", default=False, help="display tqdm progress bar"
+    )
+
+    parser.add_argument(
+        "--clock",
+        action="store_true",
+        default=False,
+        help="Display elapsed time of job",
     )
 
     return parser.parse_args()
@@ -107,12 +121,14 @@ def parse_arguments():
 
 def main():
     args = parse_arguments()
+    if args.config is not None:
+        with open(args.config, "r") as f:
+            dic = yaml.safe_load(f)
+        args.__dict__.update(dic)
 
-    print_dict(
-        dict=args.__dict__,
-        name="args",
-    )
-
+    # time tracker
+    time = timetracker(verbose=args.clock)
+    time.tic()
     print(f"Processing slide at: {args.slide_path}...")
     reader = get_slide_reader(args.slide_path)
     slide = reader(args.slide_path)
@@ -123,6 +139,12 @@ def main():
         f"tile_feat_{args.target_mag}x_{args.patch_size}px_{args.overlap}px_overlap",
     )
     os.makedirs(out_dir, exist_ok=True)
+
+    print_dict(
+        dict=args.__dict__,
+        name="args",
+    )
+
     patcher = SlidePatcher(
         slide,
         mag_target=args.target_mag,
@@ -184,7 +206,7 @@ def main():
 
     print(f"You can visualize a umap of features in: {umap_path}")
     print(f"Feature extraction completed. Results saved to {out_dir}")
-
+    time.toc()
 
 if __name__ == "__main__":
     main()
