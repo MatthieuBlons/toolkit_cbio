@@ -133,16 +133,18 @@ def parse_arguments():
 
 def main():
     args = parse_arguments()
+    # If there is a config file we immediately, we populate args with it (keeping the default arguments if not in config)
+    if args.config is not None:
+        with open(args.config, "r") as f:
+            dic = yaml.safe_load(f)
+        args.__dict__.update(dic)
+
     output_dir = os.path.join(
         args.job_dir,
         f"tile_feat_{args.target_mag}x_{args.patch_size}px_{args.overlap}px_overlap",
     )
     os.makedirs(output_dir, exist_ok=True)
-    # If there is a config file, we populate args with it (keeping the default arguments if not in config)
-    if args.config is not None:
-        with open(args.config, "r") as f:
-            dic = yaml.safe_load(f)
-        args.__dict__.update(dic)
+    
     # make function to print dic -h
     print_dict(
         dict=args.__dict__,
