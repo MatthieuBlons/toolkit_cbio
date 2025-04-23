@@ -566,7 +566,7 @@ class HOptimus1InferenceEncoder(BasePatchEncoder):
         ), f"H-Optimus requires timm version 0.9.16, but found {timm.__version__}. Please install the correct version using `pip install timm==0.9.16`"
         from torchvision import transforms
 
-        self.enc_name = "hoptimus0"
+        self.enc_name = "hoptimus1"
 
         model = timm.create_model(
             "hf-hub:bioptimus/H-optimus-1", pretrained=True, **timm_kwargs
@@ -670,6 +670,7 @@ def get_eval_transforms(
     tforms = transforms.Compose(tforms)
 
     return tforms
+
 
 def get_weights_path(encoder_type, encoder_name):
     """
