@@ -152,6 +152,7 @@ def main():
     )
     # get slide
     all_wsi_wth_ext = glob(os.path.join(args.wsi_dir, f"*.{args.ext}*"))
+    print(f"N={len(all_wsi_wth_ext)} wsi.{args.ext} found in {args.wsi_dir}")
     assert (
         len(all_wsi_wth_ext) > 0
     ), f"no wsi with extension {args.ext} in src {args.wsi_dir}"
@@ -250,7 +251,7 @@ def main():
     progress.clear()
     # Writes the config.yaml file in output directory
     config_str = yaml.dump(copy.copy(vars(args)))
-    os.chdir(output_dir)
+    os.chdir(os.path.dirname(encoder.feat_path))
     with open("config.yaml", "w") as config_file:
         config_file.write(config_str)
 

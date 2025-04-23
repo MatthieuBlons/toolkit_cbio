@@ -8,6 +8,8 @@ import h5py
 import yaml
 import warnings
 from dtime.trackers import timetracker
+import copy
+
 warnings.filterwarnings("ignore")
 
 
@@ -207,6 +209,13 @@ def main():
     print(f"You can visualize a umap of features in: {umap_path}")
     print(f"Feature extraction completed. Results saved to {out_dir}")
     time.toc()
+
+    # Writes the config.yaml file in output directory
+    config_str = yaml.dump(copy.copy(vars(args)))
+    os.chdir(os.path.dirname(encoder.feat_path))
+    with open("config.yaml", "w") as config_file:
+        config_file.write(config_str)
+
 
 if __name__ == "__main__":
     main()
