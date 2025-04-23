@@ -289,7 +289,10 @@ class SlidePatcher:
     def visualize_cut(self, size: tuple, save_cut: str, show: bool = False):
         thumbnail = self.get_thumbnail(size, numpy=True)
         thumbnail_height, thumbnail_width, _ = thumbnail.shape
-        downsample_factor = self.slide.level_dimensions[self.level][0] / thumbnail_width
+        downsample_factor = max(
+            self.slide.level_dimensions[self.level][0] / thumbnail_width,
+            self.slide.level_dimensions[self.level][1] / thumbnail_height,
+        )
         thumbnail_patch_size = max(1, int(self.patch_size_level / downsample_factor))
         # Draw rectangles for patches
         for x, y, _, _ in self.valid_patches:
@@ -564,11 +567,11 @@ class TileEncoder:
                 enabled=(self.precision != torch.float32),
             ):
                 batch_features = self.encoder(batch_tiles)
-
-                free_mem, _ = torch.cuda.mem_get_info()
-                progress.set_postfix_str(
-                    f"Free memory = {free_mem / (1024 ** 2):.2f} MB", refresh=True
-                )
+                if "cuda" in self.device:
+                    free_mem, _ = torch.cuda.mem_get_info()
+                    progress.set_postfix_str(
+                        f"Free memory = {free_mem / (1024 ** 2):.2f} MB", refresh=True
+                    )
                 progress.update()
             features.append(batch_features.cpu().numpy())
         progress.clear()
@@ -713,7 +716,6 @@ class EncodingSampler:
 
     def get_feat(self):
         sample = getattr(self.sampler + "_sampler")(self.n_samples)
-        print(sample)
         feat = self.features[sample]
         return sample, feat
 
