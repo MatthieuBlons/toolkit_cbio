@@ -141,13 +141,13 @@ class OpenWSI:
                 else:
                     break  # level_downsamples are sorted, no need to check further
             if level_best is not None:
-                return level_best, level_downsample, resize_factor
+                return level_best, level_downsamples[level_best], resize_factor
         else:
             # Upsampling: find the smallest level_downsample greater than or equal to the desired downsample
             for level, level_downsample in enumerate(level_downsamples):
                 if level_downsample >= ask_downsample:
                     resize_factor = ask_downsample / level_downsample
-                    return level, level_downsample, resize_factor
+                    return level, level_downsamples[level], resize_factor
 
         # If no suitable level is found, raise an error
         raise ValueError(f"No level found for downsample {ask_downsample}.")
