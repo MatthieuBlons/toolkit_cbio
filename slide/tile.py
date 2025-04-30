@@ -709,7 +709,16 @@ class EncodingSampler:
         self.feat_path = feat_path
         self.name, _ = os.path.splitext(os.path.basename(feat_path))
         self.n_samples = n_samples
-        self.attributes, self.features = self.read_h5(feat_path)
+        _, self.features = self.read_h5(feat_path)
+        self.attributes, self.coords = self.read_h5(feat_path, key="coords")
+        self.w, self.h = (
+            self.attributes["level_patch_size"],
+            self.attributes["level_patch_size"],
+        )
+        self.true_w, self.true_h = (
+            self.attributes["target_patch_size"] * self.attributes["target_mpp"],
+            self.attributes["target_patch_size"] * self.attributes["target_mpp"],
+        )
 
     def __len__(self):
         return self.features.shape[0]
@@ -734,8 +743,26 @@ class EncodingSampler:
             indices = self.all_sampler(n_samples)
         return indices
 
-    def read_h5(self, path):
+    def niche_sampler(self, n_samples, hop=2):
+        indices = []
+        n_niches = int(n_samples / (2 * hop + 1) ** 2)
+        seeds = self.random_sampler(n_niches)
+        for i, s in enumerate(seeds):
+            seed_x, seed_y = self.coords[s, :2]
+            neigh_x = np.arange(
+                seed_x - hop * self.w, seed_x + hop * self.w + 1, self.w
+            )
+            neigh_y = np.arange(
+                seed_y - hop * self.h, seed_y + hop * self.h + 1, self.h
+            )
+            inx = np.nonzero(np.isin(self.coords[:, 0], neigh_x))[0]
+            iny = np.nonzero(np.isin(self.coords[:, 1], neigh_y))[0]
+            inter = np.intersect1d(inx, iny)
+            indices += inter.tolist()
+        return list(set(indices))
+
+    def read_h5(self, path, key="features"):
         with h5py.File(path, "r") as f:
-            attrs = dict(f["features"].attrs)
-            feats = f["features"][:]
+            attrs = dict(f[key].attrs)
+            feats = f[key][:]
         return attrs, feats
