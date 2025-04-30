@@ -3,7 +3,7 @@ from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 from slide.tile import SlidePatcher, TileEncoder
 from slide.utils import get_slide_reader, print_dict
 import torch
-from slide.load import encoder_factory
+from slide.tile_encoder.load import encoder_factory
 import yaml
 from tqdm import tqdm
 from glob import glob
@@ -128,6 +128,14 @@ def parse_arguments():
         help="Display elapsed time of job",
     )
 
+    parser.add_argument(
+        "--model_summary",
+        type=int,
+        choices=[0, 1, 2],
+        default=0,
+        help="Display model summary",
+    )
+
     return parser.parse_args()
 
 
@@ -138,52 +146,52 @@ def main():
         with open(args.config, "r") as f:
             dic = yaml.safe_load(f)
         args.__dict__.update(dic)
-
+    # output directory
     output_dir = os.path.join(
         args.job_dir,
         f"tile_feat_{args.target_mag}x_{args.patch_size}px_{args.overlap}px_overlap",
     )
     os.makedirs(output_dir, exist_ok=True)
-    
-    # make function to print dic -h
     print_dict(
         dict=args.__dict__,
         name="args",
     )
-    # get slide
+
+    # get slides to process
     all_wsi_wth_ext = glob(os.path.join(args.wsi_dir, f"*.{args.ext}*"))
-    print(f"N={len(all_wsi_wth_ext)} wsi.{args.ext} found in {args.wsi_dir}")
     assert (
         len(all_wsi_wth_ext) > 0
     ), f"no wsi with extension {args.ext} in src {args.wsi_dir}"
-    print(f"num wsi = {len(all_wsi_wth_ext)}")
+    print(f"N = {len(all_wsi_wth_ext)} wsi.{args.ext} found in {args.wsi_dir}...")
+    # processed already?
+    features_dir = os.path.join(output_dir, f"features_{args.encoder}")
+    processed_already = glob(os.path.join(features_dir, "*.h5*"))
+    wsi_to_exclude = [
+        os.path.basename(os.path.splitext(p)[0]) for p in processed_already
+    ]
+    print(
+        f"N = {len(wsi_to_exclude)} wsi have aleardy been processed wth {args.encoder}... "
+    )
+    wsi_to_process = [
+        wsi
+        for wsi in all_wsi_wth_ext
+        if not any([True for t in wsi_to_exclude if t in wsi])
+    ]
+    print(f"N (total) = {len(wsi_to_process)} wsi will be processed... ")
 
     model = encoder_factory(args.encoder)
     if args.gpu:
         device = f"cuda:{args.device}"
     else:
         device = "cpu"
-
+    print(f"Encoding valid tissue patches with {args.encoder}...")
     model.to(device)
+    model.print_summary(verbose=args.model_summary)
     used_memory = torch.cuda.memory_allocated()
     print(f"Memory allocated for {args.encoder}: {used_memory / (1024 ** 2):.2f} MB")
     free_mem, total_mem = torch.cuda.mem_get_info()
     print(f"Free memory: {free_mem / (1024 ** 2):.2f} MB")
     print(f"Total memory: {total_mem / (1024 ** 2):.2f} MB")
-
-    # enc process already? make a fucntion
-    features_dir = os.path.join(output_dir, f"features_{args.encoder}")
-    processed_already = glob(os.path.join(features_dir, "*.h5*"))
-    wsi_to_exclude = [
-        os.path.basename(os.path.splitext(p)[0])[:-6] for p in processed_already
-    ]
-    print(
-        f"num wsi (total) = {len(wsi_to_exclude)} have aleardy been processed wth {args.encoder}... "
-    )
-
-    wsi_to_process = [
-        s for s in all_wsi_wth_ext if not any([True for t in wsi_to_exclude if t in s])
-    ]
 
     # time tracker
     time = timetracker(verbose=args.clock)
@@ -191,7 +199,7 @@ def main():
     progress = tqdm(
         wsi_to_process,
         desc=f"batch enc wth {args.encoder}",
-        total=len(all_wsi_wth_ext),
+        total=len(wsi_to_process),
         unit="wsi",
         initial=0,
         position=0,
@@ -249,11 +257,14 @@ def main():
         progress.update()
 
     progress.clear()
+    
+    '''
     # Writes the config.yaml file in output directory
     config_str = yaml.dump(copy.copy(vars(args)))
     os.chdir(os.path.dirname(encoder.feat_path))
     with open("config.yaml", "w") as config_file:
         config_file.write(config_str)
+    '''
 
     print(f"Feature extraction done! Results saved to {output_dir}")
     time.toc()
