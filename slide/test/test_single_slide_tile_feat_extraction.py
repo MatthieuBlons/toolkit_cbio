@@ -1,10 +1,9 @@
 import os
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 from slide.tile import SlidePatcher, TileEncoder
-from slide.utils import get_slide_reader, print_attrs, print_dict
+from slide.utils import get_slide_reader, print_dict
 import torch
-from slide.load import encoder_factory
-import h5py
+from slide.tile_encoder.load import encoder_factory
 import yaml
 import warnings
 from dtime.trackers import timetracker
@@ -17,7 +16,7 @@ def parse_arguments():
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
 
     parser.add_argument(
-        "--gpu", action="store_true", default=True, help="Enable GPU acceleartion"
+        "--gpu", action="store_true", default=False, help="Enable GPU acceleartion"
     )
     parser.add_argument(
         "--device", type=int, default=0, help="Device ID to use for encoding tiles"
@@ -118,6 +117,14 @@ def parse_arguments():
         help="Display elapsed time of job",
     )
 
+    parser.add_argument(
+        "--model_summary",
+        type=int,
+        choices=[0, 1, 2],
+        default=0,
+        help="Display model summary",
+    )
+
     return parser.parse_args()
 
 
@@ -127,7 +134,6 @@ def main():
         with open(args.config, "r") as f:
             dic = yaml.safe_load(f)
         args.__dict__.update(dic)
-
     # time tracker
     time = timetracker(verbose=args.clock)
     time.tic()
@@ -141,12 +147,10 @@ def main():
         f"tile_feat_{args.target_mag}x_{args.patch_size}px_{args.overlap}px_overlap",
     )
     os.makedirs(out_dir, exist_ok=True)
-
     print_dict(
         dict=args.__dict__,
         name="args",
     )
-
     patcher = SlidePatcher(
         slide,
         mag_target=args.target_mag,
@@ -167,10 +171,6 @@ def main():
     visu_dir = os.path.join(out_dir, "visualization")
     cut_path = patcher.visualize_cut(size=(1024, 1024), save_cut=visu_dir, show=True)
     print(f"You can visualize patch extraction in: {cut_path}")
-    # print patch file contents and attribute
-    with h5py.File(patcher.patch_path, "r") as h5_file:
-        print("Contents and Attributes in patch file:")
-        h5_file.visititems(print_attrs)
     # Encode patches with encoder
     print(f"Encoding valid tissue patches with {args.encoder}...")
     model = encoder_factory(args.encoder)
@@ -179,12 +179,12 @@ def main():
     else:
         device = "cpu"
     model.to(device)
+    model.print_summary(verbose=args.model_summary)
     used_memory = torch.cuda.memory_allocated()
     print(f"Memory allocated for {args.encoder}: {used_memory / (1024 ** 2):.2f} MB")
     free_mem, total_mem = torch.cuda.mem_get_info()
     print(f"Free memory: {free_mem / (1024 ** 2):.2f} MB")
     print(f"Total memory: {total_mem / (1024 ** 2):.2f} MB")
-
     encoder = TileEncoder(
         slide,
         tile_encoder=model,
@@ -196,20 +196,14 @@ def main():
         dst=out_dir,
         verbose=args.tqdm,
     )
-    with h5py.File(encoder.feat_path, "r") as h5_file:
-        print("Contents and Attributes in feats file:")
-        h5_file.visititems(print_attrs)
-
     # save features umap visualization
     umap_dir = os.path.join(out_dir, f"cluster_{args.encoder}")
     umap_path = encoder.visualize_feat(
         pcs=50, neighbors=20, resolution=0.2, save_cluster=umap_dir
     )
-
     print(f"You can visualize a umap of features in: {umap_path}")
     print(f"Feature extraction completed. Results saved to {out_dir}")
     time.toc()
-
     # Writes the config.yaml file in output directory
     config_str = yaml.dump(copy.copy(vars(args)))
     os.chdir(os.path.dirname(encoder.feat_path))

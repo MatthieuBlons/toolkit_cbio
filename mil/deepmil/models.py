@@ -163,8 +163,6 @@ class DeepMIL(Model):
         :return nn.Module: MIL network.
         """
         net = MILFactory(self.args)
-        # print(self.args.device)
-        # print(f"cuda is available: {torch.cuda.is_available()} with n={torch.cuda.device_count()} devices")
         net = net.to(self.args.device)
         return net
 
@@ -198,7 +196,7 @@ class DeepMIL(Model):
         if args.lr_scheduler == "cos":
             schedulers = [
                 torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                    optimizer=o, T_0=1, T_mult=2
+                    optimizer=o, T_0=int(self.args.epochs * 0.05), T_mult=2
                 )
                 for o in self.optimizers
             ]
@@ -210,10 +208,10 @@ class DeepMIL(Model):
         :param args: Namespace. Outputs of .arguments.get_arguments.
         """
         if args.optimizer == "adam":
-            optimizer = Adam(self.network.parameters(), lr=args.lr)
+            optimizer = Adam(self.network.parameters(), lr=args.lr, weight_decay=1e-5)
         if args.optimizer == "sgd":
             optimizer = torch.optim.SGD(
-                self.network.parameters(), args.lr, momentum=0.9, weight_decay=1e-4
+                self.network.parameters(), args.lr, momentum=0.9, weight_decay=1e-5
             )
         return optimizer
 
@@ -248,7 +246,7 @@ class DeepMIL(Model):
         :param out: torch.tensor or ndarray, output of the MIL network
         :return type(out), pseudo proba.
         """
-        if self.model_name in ["multiheadmulticlass", "mhmc_conan", "mhmc_layers"]:
+        if self.model_name in ["generalmil", "conan", "mhmclayers", "transformermil"]:
             return np.exp(out)
         else:
             return out

@@ -187,11 +187,12 @@ def main():
     timer.toc()
     # Root of experiment.
     os.chdir(output_dir)
+    # check if n_ensemble<=repeat if not only 
     training_args = ["--n_ensemble", f"{args.n_ensemble}"]
     print(f"write validation results & save n={args.n_ensemble} best models per fold")
     writes_validation_results(training_args)
     print(
-        f"assert ensemble performances on test data using n={args.n_ensemble} best models"
+        f"assess ensemble performances on test data using n={args.n_ensemble} best models"
     )
     writes_test_results([])
     print(f"test done!")

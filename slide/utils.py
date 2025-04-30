@@ -452,3 +452,42 @@ def save_h5(save_path, assets, attributes=None, mode="w"):
                 dset.resize(len(dset) + data_shape[0], axis=0)
                 dset[-data_shape[0] :] = val
 
+def get_weights_path(encoder_type, encoder_name):
+    """
+    Retrieve the path to the weights file for a given model name.
+
+    This function looks up the path to the weights file in a local checkpoint
+    registry (local_ckpts.json). If the path in the registry is absolute, it
+    returns that path. If the path is relative, it joins the relative path with
+    the provided weights_root directory.
+
+    Args:
+        weights_root (str): The root directory where weights files are stored.
+        name (str): The name of the model whose weights path is to be retrieved.
+
+    Returns:
+        str: The absolute path to the weights file.
+    """
+    root = os.path.join(os.path.dirname(__file__), f"{encoder_type}_encoder")
+    assert encoder_type in [
+        "tile",
+        "slide",
+    ], f"Encoder type must be 'tile' or 'slide', not '{encoder_type}'"
+    registry_path = os.path.join(root, "local_ckpts.json")
+    with open(registry_path, "r") as f:
+        registry = json.load(f)
+    path = registry.get(encoder_name)
+    if not path:
+        raise ValueError(
+            f"Please specify the weights path to '{encoder_name}' in '{registry_path}'"
+        )
+    path = (
+        path
+        if os.path.isabs(path)
+        else os.path.abspath(os.path.join(root, "model_zoo", path))
+    )  # Make path absolute
+    if not os.path.exists(path):
+        print(
+            f"WARNING: Path at '{path}' does not exist. Please double-check the registry in '{registry_path}'"
+        )
+    return path

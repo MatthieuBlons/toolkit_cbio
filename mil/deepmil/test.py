@@ -1,31 +1,12 @@
-"""
-Test a given model.
-"""
-
 import numpy as np
 import pandas as pd
 import os
 import torch
 from .dataloader import Dataset_handler
 from .predict import load_model
-from collections.abc import MutableMapping
 
 
-def convert_flatten(d, parent_key="", sep="_"):
-    """
-    Flattens a nested dict.
-    """
-    items = []
-    for k, v in d.items():
-        new_key = parent_key + sep + k if parent_key else k
-        if isinstance(v, MutableMapping):
-            items.extend(convert_flatten(v, new_key, sep=sep).items())
-        else:
-            items.append((new_key, v))
-    return dict(items)
-
-
-def test(model, dataloader, table):
+def test(model, dataloader):
     """
     test one model
     """
@@ -34,14 +15,11 @@ def test(model, dataloader, table):
     for input_batch, target_batch in dataloader:
         gt.append(np.array(target_batch))
         _ = model.evaluate(input_batch, target_batch)
-    gt = np.vstack(gt)
+    gts = np.vstack(gt)
     scores = model.results_val["scores"]
-    ids = [
-        os.path.splitext(os.path.basename(x))[0].split("_embedded")[0]
-        for x in dataloader.dataset.files
-    ]
+    ids = [os.path.splitext(os.path.basename(x))[0] for x in dataloader.dataset.files]
     outputs_dict = {
-        "gt": gt,
+        "gt": gts,
         "scores": scores,
         "ids": ids,
         "label_encoder": model.label_encoder,
@@ -74,9 +52,10 @@ def fill_table(table, proba_preds, preds, ids):
     return table
 
 
-def main(model_path=None, w=False, rm_duplicates=True):
+def main(model_path=None, rm_duplicates=True, verbose=0):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = load_model(model_path, device)
+    model.network.print_summary(verbose=verbose)
     args = model.args
     table = pd.read_csv(args.target_path)
     if rm_duplicates:  # Allows the use of upsampling.
@@ -84,5 +63,5 @@ def main(model_path=None, w=False, rm_duplicates=True):
     args.train = False
     data = Dataset_handler(args)
     dataloader = data.get_loader(training=False)
-    results = test(model, dataloader, table)
+    results = test(model, dataloader)
     return results

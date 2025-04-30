@@ -1,4 +1,5 @@
 from mil.deepmil.train import main as train
+from mil.deepmil.test import main as test
 from mil.deepmil.utils import print_dict
 import os
 import datetime
@@ -7,6 +8,8 @@ import yaml
 from dtime.trackers import timetracker
 from torch import cuda
 import warnings
+import pandas as pd
+import numpy as np
 
 warnings.filterwarnings("ignore")
 
@@ -98,11 +101,13 @@ def main():
             config_mil = yaml.safe_load(f)
             args.__dict__.update(config_mil)
     except FileNotFoundError:
-        print("could not find config file, will use deflaut mil param")
+        print("could not find config file, will use mil deflaut param")
 
     if "n_tiles" in args.__dict__.values():
         n_tiles = args["n_tiles"]
-        print(f"will use n = {n_tiles} tiles per wsi for training & validation")
+        print(f"will use n = {n_tiles} tiles per wsi during training & validation")
+    else:
+        print(f"all tiles will be used during training & validation")
 
     # choose better default job name
     date_tag = datetime.date.today().strftime("%Y_%m_%d")
@@ -136,9 +141,19 @@ def main():
         "--config",
         args.config,
     ]
-    timer.tic()
+
     train(known_args=training_args, verbose=args.tqdm)
     print(f"training done!")
+
+    model_path = os.path.join(output_dir, "model_best.pt.tar")
+    results = test(model_path)
+    indices = results["ids"]
+    gt = [int(gt[0]) for gt in results["gt"]]
+    pred = [int(np.argmax(score)) for score in results["scores"]]
+    df = pd.DataFrame({"ids": indices, "gt": gt, "pred": pred})
+    df.to_csv("prediction.csv", index=False)
+    print("Done")
+
     timer.tic()
 
 

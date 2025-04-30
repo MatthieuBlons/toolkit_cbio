@@ -1,7 +1,3 @@
-"""
-Horrible le systeme de soft voting, refaire entièrement quand fini
-"""
-
 from .test import main as main_test
 from .predict import load_model
 from argparse import ArgumentParser
@@ -12,6 +8,7 @@ from glob import glob
 import os
 import pandas as pd
 import warnings
+from .utils import assert_identity
 
 warnings.filterwarnings("ignore")
 
@@ -22,19 +19,9 @@ def extract_test_repeat(path):
     return test, repeat
 
 
-def assert_identity(i1, i2):
-    """
-    asserts that all indices are in the same sequence in the res list.
-    """
-    assert list(i1) == list(
-        i2
-    ), "the sequence of images are different between several models"
-    return i2
-
-
+# redo soft_voting
 def soft_voting(final_res, table):
-    """soft_voting.
-
+    """soft_voting
     Soft ensembling of the models related to a same test set.
     :param final_res: dict, dictionnary with all the final results dictionnary
     corresponding each to a tested model.
@@ -76,8 +63,7 @@ def soft_voting(final_res, table):
 
 
 def fill_table(table, proba_preds, preds, ids, tests):
-    """fill_table.
-
+    """fill_table
     Fills a copy of the master table with logits and predictions.
 
     :param table: pd.DataFrame, master table.
@@ -85,8 +71,6 @@ def fill_table(table, proba_preds, preds, ids, tests):
     :param preds: list, predictions.
     :param ids: ID of the tested slides.
     :param tests: test folds of the tested slides.
-    """
-    """
     """
     pi_scores = []
     pi_preds = []

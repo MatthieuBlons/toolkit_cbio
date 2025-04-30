@@ -29,17 +29,8 @@ from torch.nn.parameter import Parameter
 import torch
 from torch.nn.init import xavier_uniform_, constant_
 import torch.nn.functional as F
-
-
-def is_in_args(args, name, default):
-    """Checks if the parammeter is specified in the args Namespace
-    If not, attributes him the default value
-    """
-    if name in args:
-        para = getattr(args, name)
-    else:
-        para = default
-    return para
+from mil.deepmil.utils import is_in_args
+from torchinfo import summary
 
 
 class MultiHeadAttention(Module):
@@ -125,7 +116,7 @@ class LinearBatchNorm(Module):
         return x
 
 
-class MHMC_layers(Module):
+class MHMCMultilayers(Module):
     """
     MultiHeadMultiClass attention MIL, with several layers in the decision MLP.
     Same as MultiHeadedAttentionMIL_multiclass but have a classifier with N
@@ -134,7 +125,7 @@ class MHMC_layers(Module):
     """
 
     def __init__(self, args):
-        super(MHMC_layers, self).__init__()
+        super(MHMCMultilayers, self).__init__()
         self.args = args
         self.dropout = args.dropout
         width_fe = is_in_args(args, "width_fe", 64)
@@ -383,7 +374,7 @@ class model1S(Module):
         * feature_depth: int, number of features of the inuput
         * dropout: float, dropout parameter
 
-    Ends witha Softmax, to use BCELoss
+    Ends with a Softmax, to use BCELoss
     Takes as input a WSI as a Tensor of shape BxNxD where :
         * D the feature depth
         * N the number of tiles
@@ -633,7 +624,7 @@ class TransformerMIL(Module):
         self.attention = TransformerEncoder(encoder_layer, args.ntrans, encoder_norm)
         self.attention2 = MultiheadAttention(args.feature_depth, 8)
         self.classifier = Sequential(Linear(args.feature_depth, 1), Sigmoid())
-        self.mil = MHMC_layers(args)
+        self.mil = MHMCMultilayers(args)
 
     def forward(self, x):
         x, _ = self.attention2(x, x, x)
@@ -649,22 +640,11 @@ class MILFactory(Module):
     Not implemented yet (only takes feat vectors as input not images)
     """
 
-    models = {
-        "generalmil": GeneralMIL,
-        "multiheadmil": MultiHeadedAttentionMIL,
-        "mhmc_layers": MHMC_layers,
-        "conan": Conan,
-        "1s": model1S,
-        "sa": SelfAttentionMIL,
-        "transformermil": TransformerMIL,
-    }
-
     def __init__(self, args):
         super(MILFactory, self).__init__()
         self.args = args
         self.features_tiles = Identity(args)
-        self.name = args.model
-        self.mil = self.models[self.name](args)
+        self.name, self.mil = self.get_model(args)
 
     def forward(self, x):
         if self.args.constant_size:
@@ -675,3 +655,26 @@ class MILFactory(Module):
         x = x.view(batch_size, nb_tiles, self.args.feature_depth)
         x = self.mil(x)
         return x
+
+    def get_model(self, args):
+        model_name = args.model
+        if model_name == "generalmil":
+            mil = GeneralMIL
+        elif model_name == "multiheadmil":
+            mil = MultiHeadedAttentionMIL
+        elif model_name == "mhmclayers":
+            mil = MHMCMultilayers
+        elif model_name == "conan":
+            mil = Conan
+        elif model_name == "1s":
+            mil = model1S
+        elif model_name == "selfattentionmil":
+            mil = SelfAttentionMIL
+        elif model_name == "transformermil":
+            mil = TransformerMIL
+        else:
+            raise ValueError(f"Unknown encoder name {model_name}")
+        return model_name, mil(args)
+
+    def print_summary(self, depth=4, verbose=1):
+        summary(self.mil, depth=depth, verbose=verbose)

@@ -1,9 +1,9 @@
-"""Writes results from the output directory of the 
-train process in simple_cross_val.nf. On the contrary to hyperparameter search, 
+"""
+Writes results from the output directory of the
+train process in simple_cross_val.nf. On the contrary to hyperparameter search,
 no config params !
 """
 
-from collections.abc import MutableMapping
 from argparse import ArgumentParser
 import numpy as np
 from glob import glob
@@ -11,7 +11,6 @@ import pandas as pd
 import os
 import torch
 import shutil
-from .test import convert_flatten
 
 
 def extract_config(config_path):
@@ -53,7 +52,6 @@ def mean_dataframe(df):
     """
     tests = set(df["test"])
     rows_r = []
-    rows_rt = []
     rows_t = []
     for t in tests:
         dft = df[df["test"] == t]
@@ -115,6 +113,7 @@ def copy_best_to_root(path, param):
         t, r = p
         model_path = os.path.join(path, "test_{}/rep_{}/model_best.pt.tar".format(t, r))
         model_path = os.path.abspath(model_path)
+        # replace if exists?
         shutil.copy(model_path, "model_best_test_{}_repeat_{}.pt.tar".format(t, r))
         events_path = os.path.join(path, "test_{}/rep_{}/runs/".format(t, r))
         events_path = os.path.abspath(events_path)

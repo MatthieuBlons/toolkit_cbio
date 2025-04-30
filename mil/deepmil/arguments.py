@@ -43,7 +43,10 @@ def get_arguments(known_args=None, train=True, config=None):
     )
 
     parser.add_argument(
-        "--k_folds", type=int, default=None, help="number of k-folds for cross-validation"
+        "--k_folds",
+        type=int,
+        default=None,
+        help="number of k-folds for cross-validation",
     )
 
     parser.add_argument(
@@ -67,13 +70,14 @@ def get_arguments(known_args=None, train=True, config=None):
     parser.add_argument(
         "--n_tiles",
         type=int,
-        default=300,
+        default=0,
         help="Number of tiles per WSI. If 0, the whole slide is processed.",
     )
 
     parser.add_argument(
         "--sampler",
         type=str,
+        choices=["all", "radom", "random_strict"],
         help="Type of tile sampler. dispo : all | random | random_strict",
         default="random",
     )
@@ -122,20 +126,20 @@ def get_arguments(known_args=None, train=True, config=None):
         choices=[
             "generalmil",
             "multiheadmil",
-            "mhmc_layers",
+            "mhmclayers",
             "conan",
             "1s",
-            "sa",
+            "selfattentionmil",
             "transformermil",
         ],
-        help="name of the model used. Avail : mhmc_layers | 1s | transformermil | sa | conan ",
+        help="name of the model used.",
     )
 
     parser.add_argument(
         "--instance_transf",
         default=0,
         type=int,
-        help="either 1 or 0, wether to transform the tiles before classification and attention",
+        help="either 1 or 0, wether to transform the tiles before classification and attention.",
     )
 
     parser.add_argument(
@@ -164,6 +168,13 @@ def get_arguments(known_args=None, train=True, config=None):
         type=int,
         help="number of the internal layers of the classifier - works with model_name = mhmc_layers",
         default=3,
+    )
+
+    parser.add_argument(
+        "--width_fe",
+        type=int,
+        help="number of neurons in the internal layers of the classifier",
+        default=512,
     )
 
     parser.add_argument("--dropout", type=float, help="dropout parameter", default=0.4)
@@ -229,7 +240,7 @@ def get_arguments(known_args=None, train=True, config=None):
     args.patience_lr = None if args.lr_scheduler == "cos" else args.patience_lr
 
     # Set constant size flag
-    if args.n_tiles == 0 or args.sampler == "random_strict":
+    if args.n_tiles == 0 or args.sampler != "random":
         args.constant_size = False
     else:
         args.constant_size = True

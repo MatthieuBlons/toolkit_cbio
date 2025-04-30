@@ -23,7 +23,6 @@ def writes_metrics(writer, to_write, epoch):
 def train(model, dataloader):
     model.network.train()
     mean_loss = []
-    # check if dataloader use all wsi even when lent(train_data)%batch_size!=0
     epobatch = 1 / len(dataloader)
     for input_batch, target_batch in dataloader:
         # Feed the network with a batch and optimize the parameter
@@ -52,6 +51,7 @@ def val(model, dataloader):
 def main(known_args=None, verbose=False):
     args = get_arguments(known_args=known_args, train=True)
     model = DeepMIL(args=args, with_data=True)
+    # model.network.print_summary()
     model.get_summary_writer()
     progress = tqdm(
         desc=f"train rep={args.repeat+1}/{args.reps}, fold={args.test_fold+1}/{args.k_folds}",

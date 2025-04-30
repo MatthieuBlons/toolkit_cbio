@@ -22,12 +22,9 @@ def collate_variable_size(
 
 class WSIEncoded(Dataset):
     """
-    DO NOT PRELOAD DATASET ON RAM. may be slow.
-    OTHER SOLUTION THAT MAY WORK FASTER : write each tile as a different file. Then load each of them and
-    concatenate them to create a WSI.
-    Implements a dataloader for already coded WSI.
-    Each WSI is therefore a .npy array of size NxF with N the number of tiles
-    of the WSI and F the number of features of the embeding space (usually 2048).
+    Implements a dataset for already coded WSI.
+    Each WSI is therefore a .h5 array of size NxF with N the number of tiles
+    of the WSI and F the number of features of the embeding space.
     Note: no transform method because this dataset is using numpy array as inputs.
 
     The target_table (labels of the different files) may have:
@@ -144,7 +141,7 @@ class WSIEncoded(Dataset):
     def __getitem__(self, idx):
         path = self.files[idx]
         _, feats = self.get_embeddings(path)
-        mat = feats[:, : self.args.feature_depth]
+        mat = feats[:, : self.args.feature_depth]  # only works if PCA ordering ??
         mat = self._select_tiles(path, mat)
         mat = torch.from_numpy(mat).float()  # ToTensor
         target = self.target_dict[path]
@@ -212,7 +209,7 @@ class Dataset_handler:
                 sampler=self.train_sampler,
                 num_workers=self.num_workers,
                 collate_fn=collate,
-                drop_last=True,
+                drop_last=False,
             )
             dataloader_val = DataLoader(
                 dataset=self.dataset_train,
@@ -257,14 +254,12 @@ class Dataset_handler:
         """
         if use_val:
             labels_strat = [dataset.stratif_dict[x] for x in dataset.files]
-            labels = labels_strat
             splitter = StratifiedShuffleSplit(
                 n_splits=1, test_size=0.2, random_state=np.random.randint(100)
             )  # validation is done on 1/5th of the training dataset
             train_indices, val_indices = [
                 x for x in splitter.split(X=labels_strat, y=labels_strat)
             ][0]
-            labels_train = np.array(labels)[np.array(train_indices)]
             labels_train_strat = np.array(labels_strat)[np.array(train_indices)]
             val_sampler = SubsetRandomSampler(val_indices)
             train_sampler = WeightedRandomSamplerFromList(
@@ -299,12 +294,14 @@ class Dataset_handler:
 
         """
         if no_strat_sampling:
-            weights = [1 for x in labels]
             # print("no sampling strat will be used")
+            weights = [1 for x in labels]
+
         elif wr_whole_label:
+            # print("sampling conditioned by the numer of occurrences for each classes")
             cc = Counter(labels)
             weights = [1 / cc[x] for x in labels]
-            # print("sampling conditioned by the numer of occurrences for each classes")
+
         else:
             # print("sampling conditioned by the expectation of each class w.r.t the target variable")
             table = self.dataset_train.target_table
