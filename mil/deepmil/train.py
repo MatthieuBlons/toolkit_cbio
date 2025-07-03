@@ -44,7 +44,10 @@ def val(model, dataloader):
     to_write = model.flush_val_metrics()
     writes_metrics(model.writer, to_write, model.counter["epoch"])
     state = model.make_state()
-    model.update_learning_rate(model.mean_val_loss)
+    if model.args.lr_scheduler == "linear":
+        model.update_learning_rate(model.mean_val_loss)
+    elif model.args.lr_scheduler == "cos":
+        model.update_learning_rate(None)
     model.early_stopping(model.args.sgn_metric * to_write[model.args.ref_metric], state)
 
 
@@ -78,4 +81,6 @@ def main(known_args=None, verbose=False):
             refresh=True,
         )
         progress.update()
+    stop_epoch = int(model.counter["epoch"])
     model.writer.close()
+    return stop_epoch

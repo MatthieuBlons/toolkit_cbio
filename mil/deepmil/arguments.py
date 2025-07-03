@@ -16,6 +16,13 @@ def get_arguments(known_args=None, train=True, config=None):
     )
 
     parser.add_argument(
+        "--wsi_enc",
+        type=str,
+        default="tile",
+        help="Level of wsi encoding. Either 'tile' or 'slide'.",
+    )
+
+    parser.add_argument(
         "--target_path",
         type=str,
         required=True,
@@ -77,23 +84,23 @@ def get_arguments(known_args=None, train=True, config=None):
     parser.add_argument(
         "--sampler",
         type=str,
-        choices=["all", "radom", "random_strict"],
-        help="Type of tile sampler. dispo : all | random | random_strict",
+        choices=["all", "random", "random_strict", "niche"],
+        help="Type of tile sampler.",
         default="random",
     )
 
     parser.add_argument(
         "--sample_wr_whole_label",
-        type=int,
-        help="if 1, each class is equally probable. Else, sampling is done s.t. the conditional wr to the target are equals.",
-        default=0,
+        type=bool,
+        default=True,
+        help="if True each class is equally probable. Else, sampling is done s.t. the conditional wr to the target are equals.",
     )
 
     parser.add_argument(
         "--no_strat_sampling",
-        default=0,
-        type=int,
-        help="if = 1, do not use strategic sampling - even to balance the dataset -",
+        type=bool,
+        default=False,
+        help="if False, do not use strategic sampling - even to balance the dataset -",
     )
 
     parser.add_argument(
@@ -110,8 +117,9 @@ def get_arguments(known_args=None, train=True, config=None):
     parser.add_argument(
         "--ref_metric",
         type=str,
-        default="loss",
-        help="reference metric for validation, early stoping, storing of the best model.",
+        default="roc",
+        choices=["balanced_acc", "precision", "recall", "f1-score", "roc_auc", "loss"],
+        help="reference metric for validation and storing of the best model.",
     )
 
     parser.add_argument("--criterion", type=str, help="criterion used", default="nll")
@@ -122,24 +130,23 @@ def get_arguments(known_args=None, train=True, config=None):
     parser.add_argument(
         "--model",
         type=str,
-        default="mhmc_layers",
-        choices=[
-            "generalmil",
-            "multiheadmil",
-            "mhmclayers",
-            "conan",
-            "1s",
-            "selfattentionmil",
-            "transformermil",
-        ],
+        default="mhmc",
+        choices=["mhmc", "mlp"],
         help="name of the model used.",
     )
 
     parser.add_argument(
-        "--instance_transf",
-        default=0,
+        "--encoder_dim",
         type=int,
-        help="either 1 or 0, wether to transform the tiles before classification and attention.",
+        default=1536,
+        help="Dimension of the embedding space",
+    )
+
+    parser.add_argument(
+        "--feature_dim",
+        type=int,
+        default=0,
+        help="Number of raw features to keep, usefull if pca ordering. If 0 uses encoder_dim",
     )
 
     parser.add_argument(
@@ -155,18 +162,29 @@ def get_arguments(known_args=None, train=True, config=None):
     parser.add_argument(
         "--pooling_fct",
         type=str,
-        default="ilse",
-        help="pooling function used. max, mean, ilse, conan possible",
+        default="attn",
+        choices=["attn", "attn_max", "attn_gated", "mean", "max"],
+        help="pooling function used.",
     )
 
     parser.add_argument(
-        "--feature_depth", type=int, default=512, help="Number of features to keep"
+        "--instance_transf",
+        default=False,
+        type=bool,
+        help="wether to transform the tiles before attention and classification.",
+    )
+
+    parser.add_argument(
+        "--feature_depth",
+        type=int,
+        default=512,
+        help="Number of features to keep",
     )
 
     parser.add_argument(
         "--n_layers_classif",
         type=int,
-        help="number of the internal layers of the classifier - works with model_name = mhmc_layers",
+        help="number of the internal layers of the classifier - works with model = mhmc; mlp",
         default=3,
     )
 
@@ -232,18 +250,33 @@ def get_arguments(known_args=None, train=True, config=None):
             dic = yaml.safe_load(f)
         args.__dict__.update(dic)
 
-    # continue to ppolulate args
+    # continue to polulate args
     target_table = pd.read_csv(args.target_path)
     args.num_class = len(set(target_table[args.target_name]))
     args.train = train
     args.patience = args.epochs if args.patience is None else args.patience
     args.patience_lr = None if args.lr_scheduler == "cos" else args.patience_lr
 
+    assert (
+        args.feature_dim <= args.encoder_dim
+    ), "You are asking more features than there are in the embedding space!"
+    if args.feature_dim == 0:
+        args.feature_dim = args.encoder_dim
+    if not args.instance_transf:
+        args.feature_depth = args.feature_dim
+
     # Set constant size flag
-    if args.n_tiles == 0 or args.sampler != "random":
-        args.constant_size = False
-    else:
+    if args.wsi_enc == "tile":
+        if args.n_tiles == 0 or args.sampler != "random":
+            args.constant_size = False
+        else:
+            args.constant_size = True
+    elif args.wsi_enc == "slide":
+        args.n_tiles == 0
+        args.sampler == "all"
         args.constant_size = True
+        if args.batch_size == 1:
+            args.constant_size = False
 
     # Sgn_metric used to orient the early stopping and writing process.
     if args.ref_metric == "loss":

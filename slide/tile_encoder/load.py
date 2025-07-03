@@ -2,9 +2,11 @@ import traceback
 from abc import abstractmethod
 import torch
 import os
-import json
 from torchinfo import summary as model_summary
 from slide.utils import get_weights_path
+from timm.models import VisionTransformer, SwinTransformer
+from functools import partial
+
 """
 For the most part this file is a fork of https://github.com/mahmoodlab/TRIDENT/blob/main/trident/patch_encoder_models/load.py 
 It contains an assortment of pretrained patch encoders, all loadable via the encoder_factory() function.
@@ -36,7 +38,7 @@ def encoder_factory(model_name, **kwargs):
         enc = PhikonInferenceEncoder
     elif model_name == "resnet50":
         enc = ResNet50InferenceEncoder
-    elif model_name == "gigapath":
+    elif model_name == "prov_gigapath":
         enc = GigaPathInferenceEncoder
     elif model_name == "virchow":
         enc = VirchowInferenceEncoder
@@ -426,7 +428,7 @@ class GigaPathInferenceEncoder(BasePatchEncoder):
         ), f"Gigapath requires timm version 0.9.16, but found {timm.__version__}. Please install the correct version using `pip install timm==0.9.16`"
         from torchvision import transforms
 
-        self.enc_name = "gigapath"
+        self.enc_name = "prov_gigapath"
 
         model = timm.create_model(
             "hf_hub:prov-gigapath/prov-gigapath", pretrained=True, **timm_kwargs
@@ -676,3 +678,79 @@ def get_eval_transforms(
 
 
 
+class LoRALayer(torch.nn.Module):
+    def __init__(self, in_dim, out_dim, rank, alpha):
+        super().__init__()
+        std = torch.sqrt(torch.tensor(rank).float())
+        self.A = torch.nn.Parameter(torch.randn(in_dim, rank) / std)
+        self.B = torch.nn.Parameter(torch.zeros(rank, out_dim))
+        self.alpha = alpha
+
+    def forward(self, x):
+        x = self.alpha * (x @ self.A @ self.B)
+        return x
+
+
+class QkvWithLoRA(torch.nn.Module):
+    def __init__(self, qkv, rank, alpha):
+        super().__init__()
+        self.qkv = qkv
+        self.dim = qkv.in_features
+        self.lora_q = LoRALayer(self.dim, self.dim, rank, alpha)
+        self.lora_v = LoRALayer(self.dim, self.dim, rank, alpha)
+
+    def forward(self, x):
+        qkv = self.qkv(x)
+        qkv[:, :, :self.dim] += self.lora_q(x)
+        qkv[:, :, -self.dim:] += self.lora_v(x)
+        return qkv
+
+
+class LinearWithLoRA(torch.nn.Module):
+    def __init__(self, linear, rank, alpha):
+        super().__init__()
+        self.linear = linear
+        self.lora = LoRALayer(
+            linear.in_features, linear.out_features, rank, alpha
+        )
+
+    def forward(self, x):
+        return self.linear(x) + self.lora(x)
+
+
+def apply_lora(model, rank, alpha):
+    # Add LoRA adapters to self-attention blocks (query, value)
+    if isinstance(model, VisionTransformer):
+        is_vit = True
+    elif isinstance(model, SwinTransformer):
+        is_vit = False
+    else:
+        raise NotImplementedError(f"Lora implemented only for timm VisionTransformer and SwinTransformer, got {type(model)}")
+    assign_lora = partial(QkvWithLoRA, rank=rank, alpha=alpha)
+    if is_vit:
+        for block in model.blocks:
+            block.attn.qkv = assign_lora(block.attn.qkv)
+    else:
+        for layer in model.layers:
+            for block in layer.blocks:
+                block.attn.qkv = assign_lora(block.attn.qkv)
+
+
+    # Freeze all params
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # Unfreeze LoRA layers
+    if is_vit:
+        for block in model.blocks:
+            for param in block.attn.qkv.lora_q.parameters():
+                param.requires_grad = True
+            for param in block.attn.qkv.lora_v.parameters():
+                param.requires_grad = True
+    else:
+        for layer in model.layers:
+            for block in layer.blocks:
+                for param in block.attn.qkv.lora_q.parameters():
+                    param.requires_grad = True
+                for param in block.attn.qkv.lora_v.parameters():
+                    param.requires_grad = True

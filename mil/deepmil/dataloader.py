@@ -23,8 +23,8 @@ def collate_variable_size(
 class WSIEncoded(Dataset):
     """
     Implements a dataset for already coded WSI.
-    Each WSI is therefore a .h5 array of size NxF with N the number of tiles
-    of the WSI and F the number of features of the embeding space.
+    Each WSI is therefore a .npy array of size NxF with N the number of tiles
+    of the WSI and F the number of features of the embeding space (usually 2048).
     Note: no transform method because this dataset is using numpy array as inputs.
 
     The target_table (labels of the different files) may have:
@@ -45,7 +45,7 @@ class WSIEncoded(Dataset):
                 * target_name, str, name of the target variable (name of column in target_path)
                 * device, torch.device
                 * test_fold, int, number of the fold used as test.
-                * feature_depth, int, number of dimension of the embedded space to keep. (0<x<2048)
+                * feature_dim, int, number of dimension of the embedded space to keep. (0<x<2048)
                 * n_tiles, int, if 0 : take all the tiles, will need custom collate_fn, else randomly picks $nb_tiles in each WSI.
                 * train, bool, if True : extract the data s.t fold != test_fold, if False s.t. fold == testse_fold
                 * sampler, str: tile sampler. dispo : random_sampler | random_biopsie
@@ -95,9 +95,9 @@ class WSIEncoded(Dataset):
                     stratif_dict[filepath] = table[table["ID"] == name][
                         "stratif"
                     ].values[0]
-
                     sampler_dict[filepath] = EncodingSampler(
                         feat_path=filepath,
+                        feat_key=self.args.wsi_enc,
                     )
         return files_filtered, target_dict, sampler_dict, stratif_dict, label_encoder
 
@@ -114,10 +114,19 @@ class WSIEncoded(Dataset):
         return tmp, label_encoder
 
     def get_embeddings(self, path):
-        with h5py.File(path, "r") as f:
-            attrs = dict(f["features"].attrs)
-            feats = f["features"][:]
-        return attrs, feats
+        # chaneg attribute in tile patcher: "features" -> "tile_features"
+        if self.args.wsi_enc == "slide":
+            feat_key = f"{self.args.wsi_enc}_features"
+            with h5py.File(path, "r") as f:
+                attrs = dict(f[feat_key].attrs)
+                feats = f[feat_key][:]
+            return attrs, feats
+        else:
+            feat_key = "features"
+            with h5py.File(path, "r") as f:
+                attrs = dict(f[feat_key].attrs)
+                feats = f[feat_key][:]
+            return attrs, feats
 
     def _is_in_db(self, name):
         """Do we keep the file in the dataset ?"""
@@ -141,9 +150,12 @@ class WSIEncoded(Dataset):
     def __getitem__(self, idx):
         path = self.files[idx]
         _, feats = self.get_embeddings(path)
-        mat = feats[:, : self.args.feature_depth]  # only works if PCA ordering ??
-        mat = self._select_tiles(path, mat)
-        mat = torch.from_numpy(mat).float()  # ToTensor
+        if self.args.wsi_enc == "tile":
+            mat = feats[:, : self.args.feature_dim]
+            mat = self._select_tiles(path, mat)
+        elif self.args.wsi_enc == "slide":
+            mat = feats[: self.args.feature_dim]
+        mat = torch.from_numpy(mat).float()
         target = self.target_dict[path]
         return mat, target
 
@@ -252,24 +264,30 @@ class Dataset_handler:
         :param use_val: bool, if False, does not split the trainset in train/val.
         :return train_sampler, val_sampler
         """
+        replacement = True
         if use_val:
             labels_strat = [dataset.stratif_dict[x] for x in dataset.files]
+            # validation is done on 1/5th of the training dataset
             splitter = StratifiedShuffleSplit(
                 n_splits=1, test_size=0.2, random_state=np.random.randint(100)
-            )  # validation is done on 1/5th of the training dataset
+            )
             train_indices, val_indices = [
                 x for x in splitter.split(X=labels_strat, y=labels_strat)
             ][0]
             labels_train_strat = np.array(labels_strat)[np.array(train_indices)]
-            val_sampler = SubsetRandomSampler(val_indices)
+
+            val_sampler = SubsetRandomSampler(indices=val_indices)
+            if self.args.no_strat_sampling:
+                replacement = False
             train_sampler = WeightedRandomSamplerFromList(
-                self._get_weights_sampling(
+                weights=self._get_weights_sampling(
                     labels_train_strat,
                     wr_whole_label=self.args.sample_wr_whole_label,
                     no_strat_sampling=self.args.no_strat_sampling,
                 ),
-                train_indices,
-                len(train_indices),
+                indices=train_indices,
+                num_samples=len(train_indices),
+                replacement=replacement,
             )
         else:
             train_sampler = SubsetRandomSampler(list(range(len(dataset))))
@@ -303,6 +321,7 @@ class Dataset_handler:
             weights = [1 / cc[x] for x in labels]
 
         else:
+            # to keep?
             # print("sampling conditioned by the expectation of each class w.r.t the target variable")
             table = self.dataset_train.target_table
             target = self.args.target_name

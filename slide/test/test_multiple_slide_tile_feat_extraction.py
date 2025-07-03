@@ -7,7 +7,6 @@ from slide.tile_encoder.load import encoder_factory
 import yaml
 from tqdm import tqdm
 from glob import glob
-import copy
 from dtime.trackers import timetracker
 
 import warnings
@@ -210,7 +209,12 @@ def main():
     for wsi_path in progress:
 
         reader = get_slide_reader(wsi_path)
-        slide = reader(wsi_path)
+        try:
+            slide = reader(wsi_path)
+        except Exception as e:
+            print(f"Error while trying to open wsi: {e}")
+            print(f"{wsi_path} will ignored")
+            continue
         name = slide.name
 
         patcher = SlidePatcher(
@@ -248,23 +252,27 @@ def main():
         )
 
         # save features umap visualization
-        umap_dir = os.path.join(output_dir, f"cluster_{args.encoder}")
-        _ = encoder.visualize_feat(
-            pcs=50, neighbors=20, resolution=0.2, save_cluster=umap_dir
-        )
+        try:
+            umap_dir = os.path.join(output_dir, f"cluster_{args.encoder}")
+            _ = encoder.visualize_feat(
+                pcs=50, neighbors=20, resolution=0.2, save_cluster=umap_dir
+            )
+        except Exception as e:
+            print(f"Error while generating umap: {e}")
+            continue
 
         progress.set_postfix_str(f"wsi: {name}", refresh=True)
         progress.update()
 
     progress.clear()
-    
-    '''
+
+    """
     # Writes the config.yaml file in output directory
     config_str = yaml.dump(copy.copy(vars(args)))
     os.chdir(os.path.dirname(encoder.feat_path))
     with open("config.yaml", "w") as config_file:
         config_file.write(config_str)
-    '''
+    """
 
     print(f"Feature extraction done! Results saved to {output_dir}")
     time.toc()

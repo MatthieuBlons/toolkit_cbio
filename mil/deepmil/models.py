@@ -194,9 +194,11 @@ class DeepMIL(Model):
                 for o in self.optimizers
             ]
         if args.lr_scheduler == "cos":
+            # Use T_0 = 1 or allow first epochs to have a stable lr
+            # add eta_min = minimal lr?
             schedulers = [
                 torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                    optimizer=o, T_0=int(self.args.epochs * 0.05), T_mult=2
+                    optimizer=o, T_0=1, T_mult=2
                 )
                 for o in self.optimizers
             ]
@@ -246,7 +248,7 @@ class DeepMIL(Model):
         :param out: torch.tensor or ndarray, output of the MIL network
         :return type(out), pseudo proba.
         """
-        if self.model_name in ["generalmil", "conan", "mhmclayers", "transformermil"]:
+        if self.model_name in ["mhmc", "mlp"]:
             return np.exp(out)
         else:
             return out
@@ -338,6 +340,7 @@ class DeepMIL(Model):
                 y_true=y_true, y_score=scores[:, 1]
             )
         metrics_dict["epoch"] = self.counter["epoch"]
+        metrics_dict["lr"] = [scheduler._last_lr[0] for scheduler in self.schedulers][0]
         return metrics_dict
 
     def predict(self, x):

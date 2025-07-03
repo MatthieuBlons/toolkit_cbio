@@ -6,7 +6,13 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from typing import Optional
-from slide.utils import grid_blob, mask_percentage, save_h5, read_h5_coords
+from slide.utils import (
+    grid_blob,
+    mask_percentage,
+    save_h5,
+    read_h5_coords,
+    read_h5_features,
+)
 from slide.draw import visualise_tile_feat
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -275,18 +281,22 @@ class SlidePatcher:
             1,
             cv2.LINE_AA,
         )
-        # Save visualization
-        os.makedirs(save_seg, exist_ok=True)
-        cut_path = os.path.join(save_seg, f"{self.slide.name}.jpg")
-        Image.fromarray(mask).save(cut_path)
+
         if show:
             _, ax = plt.subplots(1, 1, figsize=(10, 10), layout="constrained")
             ax.set_axis_off()
             ax.imshow(mask, aspect="equal")
 
-        return cut_path
+        # Save visualization
+        if save_seg:
+            os.makedirs(save_seg, exist_ok=True)
+            cut_path = os.path.join(save_seg, f"{self.slide.name}.jpg")
+            Image.fromarray(mask).save(cut_path)
+            return cut_path
 
-    def visualize_cut(self, size: tuple, save_cut: str, show: bool = False):
+    def visualize_cut(
+        self, size: tuple, save_cut: str | None = None, show: bool = False
+    ):
         thumbnail = self.get_thumbnail(size, numpy=True)
         thumbnail_height, thumbnail_width, _ = thumbnail.shape
         downsample_factor = max(
@@ -389,17 +399,17 @@ class SlidePatcher:
             cv2.LINE_AA,
         )
 
-        # Save visualization
-        os.makedirs(save_cut, exist_ok=True)
-        cut_path = os.path.join(save_cut, f"{self.slide.name}.jpg")
-        Image.fromarray(thumbnail).save(cut_path)
-
         if show:
             _, ax = plt.subplots(1, 1, figsize=(10, 10), layout="constrained")
             ax.set_axis_off()
             ax.imshow(thumbnail, aspect="equal")
-
-        return cut_path
+        
+        # Save visualization
+        if save_cut:
+            os.makedirs(save_cut, exist_ok=True)
+            cut_path = os.path.join(save_cut, f"{self.slide.name}.jpg")
+            Image.fromarray(thumbnail).save(cut_path)
+            return cut_path
 
     def save_patch(self, dst: str | None = None, save_as: str | None = "h5"):
         if save_as == "h5":
@@ -429,9 +439,6 @@ class SlidePatcher:
         else:
             raise ValueError(f"Invalid save_as: {save_as}. Only h5 is supported.")
         return patch_file
-
-
-# class TileSampler
 
 
 # class TileEncoder
@@ -588,8 +595,15 @@ class TileEncoder:
             X=self.features,
             obs=pd.DataFrame(self.tile_coords, columns=["x", "y", "w", "h"]),
         )
+        pcs = min(pcs, *(self.features.shape))
+        if pcs > 0:
+            sc.pp.pca(features_clustered, n_comps=pcs)
+
+        neighbors = min(neighbors, self.features.shape[0] - 1)
         sc.pp.neighbors(
-            features_clustered, n_neighbors=neighbors, n_pcs=pcs, use_rep="X"
+            features_clustered,
+            n_neighbors=neighbors,
+            n_pcs=pcs,
         )
         sc.tl.umap(features_clustered)  # Compute UMAP
         sc.tl.leiden(features_clustered, resolution=resolution)
@@ -683,6 +697,83 @@ class TileEncoder:
         return features_path
 
 
+from slide.slide_encoder.load import SLIDE_TO_TILE_ENCODER_MATCH
+
+
+@torch.inference_mode()
+def aggragate_tiles_features(
+    features_path: str,
+    slide_encoder: torch.nn.Module,
+    device: Optional[str] = "cuda",
+    dst: Optional[str] = None,
+    save_as: Optional[str] = "h5",
+) -> str:
+
+    # Set the slide encoder model to device and eval
+    slide_encoder.to(device)
+    slide_encoder.eval()
+
+    xywh_attrs, xywh = read_h5_coords(features_path)
+    tile_attrs, tile_feats = read_h5_features(features_path)
+    slide_name = tile_attrs["name"]
+    tile_encoder = tile_attrs["encoder"]
+    # tile encoder sanity check:
+    try:
+        SLIDE_TO_TILE_ENCODER_MATCH[slide_encoder.enc_name] == tile_encoder
+    except ValueError as e:
+        print(
+            f"Tile features were extracted with a tile encoder which does not match the slide encoder provided"
+        )
+        exit()
+
+    # Convert slide_features to tensor
+    tile_features = torch.from_numpy(tile_feats).float().to(device)
+    tile_features = tile_features.unsqueeze(0)  # Add batch dimension
+
+    coords = torch.from_numpy(xywh[:, :2]).to(device)
+    coords = coords.unsqueeze(0)  # Add batch dimension
+
+    # Prepare input batch dictionary
+    batch = {"features": tile_features, "coords": coords, "attributes": xywh_attrs}
+
+    # Generate slide-level features
+    with torch.autocast(
+        device_type=device,
+        enabled=(slide_encoder.precision != torch.float32),
+    ):
+        slide_feats = slide_encoder(batch, device)
+    slide_feats = slide_feats.float().cpu().numpy().squeeze()
+
+    # Save slide-level features if save path is provided
+    if dst:
+        os.makedirs(dst, exist_ok=True)
+        save_path = os.path.join(dst, f"{slide_name}.{save_as}")
+        assets = {
+            "slide_features": slide_feats,
+            "tile_features": tile_feats,
+            "coords": xywh,
+        }
+        attributes = {
+            "slide_features": {
+                "encoder": slide_encoder.enc_name,
+                "name": slide_name,
+                "dst": dst,
+            },
+            "tile_features": tile_attrs,
+            "coords": xywh_attrs,
+        }
+        save_h5(
+            save_path,
+            assets=assets,
+            attributes=attributes,
+            mode="w",
+        )
+    else:
+        raise ValueError(f"Invalid save_as: {save_as}. Only h5 is supported.")
+
+    return save_path
+
+
 # add possibility to generate random biopsies
 class PatchSampler(Dataset):
     """Dataset from a WSI patcher to read tiles"""
@@ -702,15 +793,16 @@ class PatchSampler(Dataset):
 
 
 class EncodingSampler:
-    def __init__(self, feat_path, n_samples=0):
+    def __init__(self, feat_path, feat_key="tile", n_samples=0):
         """
         Sampler to get feat from h5 file
         """
         self.feat_path = feat_path
+        self.feat_key = feat_key
         self.name, _ = os.path.splitext(os.path.basename(feat_path))
         self.n_samples = n_samples
-        _, self.features = self.read_h5(feat_path)
-        self.attributes, self.coords = self.read_h5(feat_path, key="coords")
+        _, self.features = self.read_h5_feat(feat_path)
+        self.attributes, self.coords = self.read_h5_coord(feat_path)
         self.w, self.h = (
             self.attributes["level_patch_size"],
             self.attributes["level_patch_size"],
@@ -761,7 +853,19 @@ class EncodingSampler:
             indices += inter.tolist()
         return list(set(indices))
 
-    def read_h5(self, path, key="features"):
+    def read_h5_feat(self, path):
+        key = "features"
+        # chage features -> tile_features for consistency
+        if self.feat_key == "slide":
+            key = f"{self.feat_key}_features"
+
+        with h5py.File(path, "r") as f:
+            attrs = dict(f[key].attrs)
+            feats = f[key][:]
+        return attrs, feats
+
+    def read_h5_coord(self, path):
+        key = "coords"
         with h5py.File(path, "r") as f:
             attrs = dict(f[key].attrs)
             feats = f[key][:]
