@@ -343,6 +343,7 @@ def read_h5_coords(coords_path):
         coords = f["coords"][:]
     return attrs, coords
 
+
 def read_h5_features(embs_path):
     with h5py.File(embs_path, "r") as f:
         attrs = dict(f["features"].attrs)
@@ -421,6 +422,8 @@ def save_h5(save_path, assets, attributes=None, mode="w"):
             data_shape = val.shape
             if key not in file:
                 data_type = val.dtype
+                if data_type == object:  # when saving arrays of str for instance
+                    data_type = h5py.string_dtype(encoding="utf-8")
                 chunk_shape = (1,) + data_shape[1:]
                 maxshape = (None,) + data_shape[1:]
                 dset = file.create_dataset(
@@ -442,15 +445,15 @@ def save_h5(save_path, assets, attributes=None, mode="w"):
                                 elif attr_val is None:
                                     attr_val = "None"
                                 dset.attrs[attr_key] = attr_val
-                            except:
-                                raise Exception(
-                                    f"WARNING: Could not save attribute {attr_key} with value {attr_val} for asset {key}"
-                                )
+                            except Exception as e:
+                                print(e)
+                                # raise Exception(f"WARNING: Could not save attribute {attr_key} with value {attr_val} for asset {key}")
 
             else:
                 dset = file[key]
                 dset.resize(len(dset) + data_shape[0], axis=0)
                 dset[-data_shape[0] :] = val
+
 
 def get_weights_path(encoder_type, encoder_name):
     """
@@ -480,6 +483,40 @@ def get_weights_path(encoder_type, encoder_name):
     if not path:
         raise ValueError(
             f"Please specify the weights path to '{encoder_name}' in '{registry_path}'"
+        )
+    path = (
+        path
+        if os.path.isabs(path)
+        else os.path.abspath(os.path.join(root, "model_zoo", path))
+    )  # Make path absolute
+    if not os.path.exists(path):
+        print(
+            f"WARNING: Path at '{path}' does not exist. Please double-check the registry in '{registry_path}'"
+        )
+    return path
+
+def get_model_path(encoder_type, encoder_name):
+    """
+    Retrieve the path to the model file for a given model name.
+    Args:
+        weights_root (str): The root directory where weights files are stored.
+        name (str): The name of the model whose weights path is to be retrieved.
+
+    Returns:
+        str: The absolute path to the weights file.
+    """
+    root = os.path.join(os.path.dirname(__file__), f"{encoder_type}_encoder")
+    assert encoder_type in [
+        "tile",
+        "slide",
+    ], f"Encoder type must be 'tile' or 'slide', not '{encoder_type}'"
+    registry_path = os.path.join(root, "local_ckpts.json")
+    with open(registry_path, "r") as f:
+        registry = json.load(f)
+    path = registry.get(encoder_name)
+    if not path:
+        raise ValueError(
+            f"Please specify the model path to '{encoder_name}' in '{registry_path}'"
         )
     path = (
         path

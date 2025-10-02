@@ -34,9 +34,9 @@ class SlidePatcher:
         mag_target: Optional[int] = 20,
         patch_size: Optional[int] = 224,
         overlap: Optional[int] = 0,
-        mask_downsample: Optional[int] = None,
+        mask_downsample: Optional[int] = 16,
         mask_tolerance: Optional[int] = None,
-        custom_xywh: Optional[str] = None,
+        custom_xywh: Optional[np.ndarray] = None,
         xywh_only: Optional[bool] = True,
         pil: Optional[bool] = False,
         dst: Optional[str] = None,
@@ -102,6 +102,7 @@ class SlidePatcher:
             raise IndexError("Index out of range")
 
     def lazy_patch(self):
+        # populate atribute patch_size
         if isinstance(self.custom_xywh, np.ndarray):
             if self.custom_xywh.shape[1] != 4:
                 raise ValueError(
@@ -117,7 +118,7 @@ class SlidePatcher:
             self.patch_path = self.save_patch(self.dst, self.save_as)
         return 0
 
-    def get_seg_mask(self, margin: tuple | None = (32, 32)):
+    def get_seg_mask(self, margin: tuple | None = None):
         if not self.mask_downsample:
             self.mask_downsample = 1.0
             self.level_mask = self.level
@@ -134,7 +135,7 @@ class SlidePatcher:
                 self.slide.level_dimensions[self.level_mask][1],
                 self.slide.level_dimensions[self.level_mask][0],
             )
-            margin = (shape_mask[0] // 30, shape_mask[1] // 30)
+            margin = (shape_mask[0] // 50, shape_mask[1] // 50)
         mask = make_auto_mask(self.slide, self.level_mask, margin=margin)
         return mask
 
@@ -210,7 +211,6 @@ class SlidePatcher:
             tile = cv2.resize(tile, (self.patch_size_target, self.patch_size_target))[
                 :, :, :3
             ]
-
         return tile
 
     def get_thumbnail(self, size, numpy: bool = False):
@@ -219,7 +219,9 @@ class SlidePatcher:
             thumbnail = np.array(thumbnail)[:, :, :3]
         return thumbnail
 
-    def visualize_tissue_seg(self, size: tuple, save_seg: str, show: bool = False):
+    def visualize_tissue_seg(
+        self, size: tuple, save_seg: str = None, show: bool = False
+    ):
         mask = self.get_seg_mask().astype(np.uint8) * 255
         mask_height, mask_width = mask.shape
         if mask_width > mask_height:
@@ -403,7 +405,7 @@ class SlidePatcher:
             _, ax = plt.subplots(1, 1, figsize=(10, 10), layout="constrained")
             ax.set_axis_off()
             ax.imshow(thumbnail, aspect="equal")
-        
+
         # Save visualization
         if save_cut:
             os.makedirs(save_cut, exist_ok=True)
@@ -513,7 +515,7 @@ class TileEncoder:
 
     def lazy_encoder(self):
         if self.name:
-            assert self.name == self.slide.name, "tiles are patched in another slide"
+            assert self.name == self.slide.name, "tiles are from in another slide"
         self.nb_features, self.features = self.extract_patch_features()
         if self.dst:
             self.feat_path = self.save_features(self.dst, self.save_as)
@@ -563,24 +565,18 @@ class TileEncoder:
             num_workers=self.num_workers,
             pin_memory=True,
         )
-
         progress = self.progress_bar(dataloader.__len__(), verbose=self.verbose)
         features = []
         for batch_tiles, _ in dataloader:
-            batch_tiles = batch_tiles.to(self.device)
+            batch_tiles = batch_tiles.to(self.device, self.precision)
             with torch.autocast(
                 device_type=self.device,
                 dtype=self.precision,
                 enabled=(self.precision != torch.float32),
             ):
                 batch_features = self.encoder(batch_tiles)
-                if "cuda" in self.device:
-                    free_mem, _ = torch.cuda.mem_get_info()
-                    progress.set_postfix_str(
-                        f"Free memory = {free_mem / (1024 ** 2):.2f} MB", refresh=True
-                    )
                 progress.update()
-            features.append(batch_features.cpu().numpy())
+            features.append(batch_features.to("cpu", dtype=torch.float32).numpy())
         progress.clear()
 
         # Concatenate features
@@ -643,6 +639,7 @@ class TileEncoder:
                 "size": (6, 6),
                 "title": None,
                 "alpha": 0.6,
+                "smooth": None,
                 "cmap": ListedColormap(colors),
                 "vmin": vmin,
                 "vmax": vmax,
@@ -724,7 +721,6 @@ def aggragate_tiles_features(
         print(
             f"Tile features were extracted with a tile encoder which does not match the slide encoder provided"
         )
-        exit()
 
     # Convert slide_features to tensor
     tile_features = torch.from_numpy(tile_feats).float().to(device)
@@ -858,7 +854,6 @@ class EncodingSampler:
         # chage features -> tile_features for consistency
         if self.feat_key == "slide":
             key = f"{self.feat_key}_features"
-
         with h5py.File(path, "r") as f:
             attrs = dict(f[key].attrs)
             feats = f[key][:]
@@ -868,5 +863,5 @@ class EncodingSampler:
         key = "coords"
         with h5py.File(path, "r") as f:
             attrs = dict(f[key].attrs)
-            feats = f[key][:]
-        return attrs, feats
+            coords = f[key][:]
+        return attrs, coords

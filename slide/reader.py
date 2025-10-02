@@ -112,7 +112,7 @@ class OpenWSI:
 
     def read_whole(self, level: int, numpy: bool = True):
         whole = self.img.read_region(
-            location=(0, 0), level=level, size=self.level_dimensions(level)
+            location=(0, 0), level=level, size=self.level_dimensions[level]
         )
         if numpy:
             whole = np.array(whole)[:, :, :3]
