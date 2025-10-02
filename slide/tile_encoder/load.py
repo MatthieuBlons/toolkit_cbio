@@ -3,7 +3,7 @@ from abc import abstractmethod
 import torch
 import os
 from torchinfo import summary as model_summary
-from slide.utils import get_weights_path
+from slide.utils import get_weights_path, get_model_path
 from timm.models import VisionTransformer, SwinTransformer
 from functools import partial
 
@@ -11,6 +11,35 @@ from functools import partial
 For the most part this file is a fork of https://github.com/mahmoodlab/TRIDENT/blob/main/trident/patch_encoder_models/load.py 
 It contains an assortment of pretrained patch encoders, all loadable via the encoder_factory() function.
 """
+
+
+def get_encoder_mapping():
+    """
+    Get encoder mapping dictionary which maps encoder name to encoder class.
+
+    Returns:
+        dict: mapping of encoder name to encoder class.
+    """
+
+    encoder_mapping = {
+        "conch_v1": Conchv1InferenceEncoder,
+        "conch_v15": Conchv15InferenceEncoder,
+        "ctranspath": CTransPathInferenceEncoder,
+        "hoptimus0": HOptimus0InferenceEncoder,
+        "hoptimus1": HOptimus1InferenceEncoder,
+        "lora_hoptimus1": LoRAHOptimus1InferenceEncoder,
+        "musk": MuskInferenceEncoder,
+        "phikon": PhikonInferenceEncoder,
+        "phikon_v2": Phikonv2InferenceEncoder,
+        "prov_gigapath": GigaPathInferenceEncoder,
+        "resnet50": ResNet50InferenceEncoder,
+        "uni_v1": UNIInferenceEncoder,
+        "uni_v2": UNIv2InferenceEncoder,
+        "virchow": VirchowInferenceEncoder,
+        "virchow2": Virchow2InferenceEncoder,
+    }
+
+    return encoder_mapping
 
 
 def encoder_factory(model_name, **kwargs):
@@ -24,38 +53,14 @@ def encoder_factory(model_name, **kwargs):
     Returns:
         torch.nn.Module: The patch encoder model.
     """
-    if model_name == "conch_v1":
-        enc = Conchv1InferenceEncoder
-    elif model_name == "conch_v15":
-        enc = Conchv15InferenceEncoder
-    elif model_name == "uni_v1":
-        enc = UNIInferenceEncoder
-    elif model_name == "uni_v2":
-        enc = UNIv2InferenceEncoder
-    elif model_name == "ctranspath":
-        enc = CTransPathInferenceEncoder
-    elif model_name == "phikon":
-        enc = PhikonInferenceEncoder
-    elif model_name == "resnet50":
-        enc = ResNet50InferenceEncoder
-    elif model_name == "prov_gigapath":
-        enc = GigaPathInferenceEncoder
-    elif model_name == "virchow":
-        enc = VirchowInferenceEncoder
-    elif model_name == "virchow2":
-        enc = Virchow2InferenceEncoder
-    elif model_name == "hoptimus0":
-        enc = HOptimus0InferenceEncoder
-    elif model_name == "hoptimus1":
-        enc = HOptimus1InferenceEncoder
-    elif model_name == "phikon_v2":
-        enc = Phikonv2InferenceEncoder
-    elif model_name == "musk":
-        enc = MuskInferenceEncoder
+
+    # Retrieving encoder mapping dict
+    encoder_mapping = get_encoder_mapping()
+
+    if model_name in encoder_mapping.keys():
+        return encoder_mapping[model_name](**kwargs)
     else:
         raise ValueError(f"Unknown encoder name {model_name}")
-
-    return enc(**kwargs)
 
 
 ####################################################################################################
@@ -75,7 +80,11 @@ class BasePatchEncoder(torch.nn.Module):
         z = self.model(x)
         return z
 
-    def print_summary(self, depth=4, verbose=1):
+    def forward_features(self, x):
+        z = self.model.forward_features(x)
+        return z
+
+    def print_summary(self, depth=4, verbose=0):
         model_summary(self.model, depth=depth, verbose=verbose)
 
     @abstractmethod
@@ -592,6 +601,33 @@ class HOptimus1InferenceEncoder(BasePatchEncoder):
         return model, eval_transform, precision
 
 
+class LoRAHOptimus1InferenceEncoder(BasePatchEncoder):
+
+    def _build(self, **kwargs):
+        from slide.tile_encoder.model_zoo.lora_hoptimus1.model import (
+            HESingIF,
+            load_model_from_path,
+        )
+
+        self.device = (
+            kwargs.get("device", "cuda")
+            if torch.cuda.is_available()
+            else kwargs.get("device", "cpu")
+        )
+        self.how = kwargs.get("embeddings", False)
+        model_path = get_model_path("tile", "lora_hoptimus1")
+        # use load_model_from_path?
+        model = load_model_from_path(model_path=model_path, device=self.device)
+        network = model.network
+
+        if self.how:
+            self.enc_name = "lora_hoptimus1_emb"
+            return network.backbone, network.transform, network.precision["backbone"]
+        else:
+            self.enc_name = "lora_hoptimus1_out"
+            return network, network.transform, model.precision["backbone"]
+
+
 class Phikonv2InferenceEncoder(BasePatchEncoder):
     def _build(self, **kwargs):
 
@@ -677,7 +713,6 @@ def get_eval_transforms(
     return tforms
 
 
-
 class LoRALayer(torch.nn.Module):
     def __init__(self, in_dim, out_dim, rank, alpha):
         super().__init__()
@@ -701,8 +736,8 @@ class QkvWithLoRA(torch.nn.Module):
 
     def forward(self, x):
         qkv = self.qkv(x)
-        qkv[:, :, :self.dim] += self.lora_q(x)
-        qkv[:, :, -self.dim:] += self.lora_v(x)
+        qkv[:, :, : self.dim] += self.lora_q(x)
+        qkv[:, :, -self.dim :] += self.lora_v(x)
         return qkv
 
 
@@ -710,9 +745,7 @@ class LinearWithLoRA(torch.nn.Module):
     def __init__(self, linear, rank, alpha):
         super().__init__()
         self.linear = linear
-        self.lora = LoRALayer(
-            linear.in_features, linear.out_features, rank, alpha
-        )
+        self.lora = LoRALayer(linear.in_features, linear.out_features, rank, alpha)
 
     def forward(self, x):
         return self.linear(x) + self.lora(x)
@@ -725,7 +758,9 @@ def apply_lora(model, rank, alpha):
     elif isinstance(model, SwinTransformer):
         is_vit = False
     else:
-        raise NotImplementedError(f"Lora implemented only for timm VisionTransformer and SwinTransformer, got {type(model)}")
+        raise NotImplementedError(
+            f"Lora implemented only for timm VisionTransformer and SwinTransformer, got {type(model)}"
+        )
     assign_lora = partial(QkvWithLoRA, rank=rank, alpha=alpha)
     if is_vit:
         for block in model.blocks:
@@ -734,7 +769,6 @@ def apply_lora(model, rank, alpha):
         for layer in model.layers:
             for block in layer.blocks:
                 block.attn.qkv = assign_lora(block.attn.qkv)
-
 
     # Freeze all params
     for param in model.parameters():
