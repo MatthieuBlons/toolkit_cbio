@@ -109,7 +109,8 @@ def test_stratif(table, equ_vars, target, k):
     divide into k-fold the dataset (creation of test_set)
     according to all the variables in equ_vars and target.
     """
-    table = pd.read_csv(table)
+    if isinstance(table, str):
+        table = pd.read_csv(table)
     if type(equ_vars) != list:
         equ_vars = [equ_vars]
     equ_vars = equ_vars + [target]

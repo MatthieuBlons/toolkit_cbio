@@ -1,4 +1,4 @@
-from mil.visualizer.dissector import HeatmapMaker
+from mil.visualizer.best_tile import HeatmapMaker
 from glob import glob
 from argparse import ArgumentParser
 import os

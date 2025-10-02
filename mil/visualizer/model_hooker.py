@@ -1,7 +1,7 @@
-class HookerMIL:
+class HookerAttnMIL:
     """
     Manage the hooks for the MIL algorithm.
-    Works with a MIL instantiated with an MHMC_layers model.
+    Works with a MIL instantiated with an MHMC model.
     """
 
     def __init__(self, network, num_heads):
@@ -9,9 +9,21 @@ class HookerMIL:
         self.place_hooks(network)
 
         # Possibly filled attribute
+        self.tiles_transf = None
         self.tiles_weights = None
         self.head_average = None
+        self.reprewsi = None
         self.scores = None
+
+    def _get_instance_transf(self):
+        def hook_instance_transf(m, i, o):
+            """
+            hooks the output of the attention heads
+            """
+            tiles_transf = i[0]
+            self.tiles_transf = tiles_transf.detach().cpu().numpy()
+
+        return hook_instance_transf
 
     def _get_attention_hook(self):
         def hook_attention(m, i, o):
@@ -58,15 +70,23 @@ class HookerMIL:
         for name, layer in net.named_children():
             if list(layer.children()):
                 self.place_hooks(layer)
+
+            if name == "instance_transf":
+                hook_layer = list(layer.children())[0]  # last layer is softmax
+                hook_layer.register_forward_hook(self._get_instance_transf())
+
             if name == "attention":
                 hook_layer = list(layer.children())[-1]  # last layer is softmax
                 hook_layer.register_forward_hook(self._get_attention_hook())
+
             if name == "classifier":
-                hook_layer = list(layer.children())[0]
-                hook_layer.register_forward_hook(self._get_average_hook())
+                layer_avg = list(layer.children())[0]
+                layer_avg.register_forward_hook(self._get_average_hook())
+
                 layer_reprewsi = list(layer.children())[-2]
                 layer_reprewsi.register_forward_hook(
                     self._get_wsi_representation_hook()
                 )
+
                 layer_scores = list(layer.children())[-1]
                 layer_scores.register_forward_hook(self._get_outputs_hook())

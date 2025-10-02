@@ -1,4 +1,4 @@
-from mil.visualizer.dissector import TileSeeker, ConsensusTileSeeker
+from mil.visualizer.best_tile import TileSeeker, ConsensusTileSeeker
 from glob import glob
 import pickle
 from argparse import ArgumentParser
