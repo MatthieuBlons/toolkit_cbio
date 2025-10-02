@@ -94,3 +94,57 @@ def pointillism(colorlist, dotsize=(16, 16), ax=None):
                 gridpos += 1
     # show image
     ax.imshow(grid)
+
+
+def plot_2Dproj_img_grid(emb_2d, images, savepath=None, grid_size=50, img_size=32):
+    """
+    Display images on a grid based on t-SNE coordinates (no overlap).
+
+    emb_2d : (N,2) array of t-SNE coordinates
+    images : list/array of images (H,W,C)
+    grid_size : size of the grid (grid_size x grid_size)
+    img_size : final size of each thumbnail in pixels
+    """
+    # Normalize coordinates to [0, 1]
+    x = (emb_2d[:, 0] - emb_2d[:, 0].min()) / (emb_2d[:, 0].max() - emb_2d[:, 0].min())
+    y = (emb_2d[:, 1] - emb_2d[:, 1].min()) / (emb_2d[:, 1].max() - emb_2d[:, 1].min())
+
+    # Grid indices
+    gx = np.floor(x * (grid_size - 1)).astype(int)
+    gy = np.floor(y * (grid_size - 1)).astype(int)
+
+    # Final canvas (empty grid)
+    canvas = 255 * np.ones(
+        (grid_size * img_size, grid_size * img_size, 3), dtype=np.uint8
+    )
+
+    filled = set()
+    for i in range(len(images)):
+        cell = (gx[i], gy[i])
+        if cell in filled:  # if already filled, skip
+            continue
+        filled.add(cell)
+
+        # Crop and resize the image
+        img = images[i]
+        if img.shape[0] != img_size or img.shape[1] != img_size:
+            from skimage.transform import resize
+
+            img = (255 * resize(img, (img_size, img_size), anti_aliasing=True)).astype(
+                np.uint8
+            )
+
+        # Position in the grid
+        x0, y0 = cell[0] * img_size, cell[1] * img_size
+        canvas[y0 : y0 + img_size, x0 : x0 + img_size] = img
+
+    plt.figure(figsize=(10, 10))
+    plt.imshow(canvas)
+    plt.axis("off")
+    plt.tight_layout()
+    plt.gca().invert_yaxis()
+    if savepath is not None:
+        plt.savefig(savepath, dpi=300, bbox_inches="tight")
+        plt.close()
+    else:
+        plt.show()
