@@ -9,6 +9,8 @@
     "virchow": "",
     "virchow2": "",
     "hoptimus0": "",
+    "hoptimus1": "",
+    "lora_hoptimus1": "./lora_hoptimus1/model_best_250722.pt.tar",
     "phikon_v2": "./phikon_v2",
     "conch_v15": "./conchv1_5/pytorch_model_vision.bin",
     "custom_encoder": ""
