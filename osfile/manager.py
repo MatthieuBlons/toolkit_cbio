@@ -1,5 +1,10 @@
 import os
+from pathlib import Path
 from datetime import datetime
+
+# put in osfile
+def safe_mkdir(path):
+    Path(path).mkdir(parents=True, exist_ok=True)
 
 
 def findFile(dir, strings=None, fileExtensions=False, isFolder=False):
@@ -149,3 +154,4 @@ def add_suffix(dir, names, suffix):
             os.path.join(dir, old).replace("\\", "/"),
             os.path.join(dir, new).replace("\\", "/"),
         )
+
