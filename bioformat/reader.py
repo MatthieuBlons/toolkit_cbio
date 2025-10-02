@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 from PIL import Image
 from multiplex.draw import blend_colors
 from cv2 import convertScaleAbs
+import random
 
 
 # could add the possibility to patch array directly the the OpenOME class
@@ -183,7 +184,12 @@ class OpenOME:
         cnt = 0
         for channel in channels:
             cnt += 1
-            color = int(channel.get("Color"))
+            try:
+                color = int(channel.get("Color"))
+            except TypeError:
+                color = None
+            if color is None:
+                color = random.randint(0, 0xFFFFFFFF)
             # Convert integer color to RGB
             r = (color >> 24) & 0xFF
             g = (color >> 16) & 0xFF
@@ -201,33 +207,49 @@ class OpenOME:
             )
         return info_dict
 
-    def read_whole(self, level, numpy=True):
-        if level > self.level_count:
-            level = self.level_count
-            print("pyramidal level was set to lowest...")
+    def check_if_rgb(self):
+        self.is_rgb = False
+        if self.pages == 1 and self.bands == 3:
+            self.is_rgb = True
+
+    def check_if_multiplex(self):
+        self.is_multiplex = False
+        if self.pages > 1 and self.bands == 1:
+            self.is_multiplex = True
+
+    def open_vips(self, level):
         if self.pages > 1:
-            # The full-size image is not in subifd but in the main IFD and can be accessed with subifd=-1.
             pages = [
                 pyvips.Image.tiffload(
                     self.img_path, page=i, subifd=level - 1, access="sequential"
                 )
                 for i in range(0, self.pages)
             ]
-            whole = pages[0].bandjoin(pages[1:])
+            img = pages[0].bandjoin(pages[1:])
         else:
-            whole = pyvips.Image.tiffload(
+            # The full-size image is not in subifd but in the main IFD and can be accessed with subifd=-1.
+            img = pyvips.Image.tiffload(
                 self.img_path, subifd=level - 1, access="sequential"
             )
+        return img
+
+    def read_whole(self, level, numpy=True):
+        if level > self.level_count:
+            level = self.level_count - 1
+            print("pyramidal level was set to lowest...")
+        whole = self.open_vips(level=level)
         if numpy:
-            whole = whole.numpy()
-            if self.format == "ushort":
-                whole = convertScaleAbs(whole, alpha=(255.0 / 65535.0))
-        return whole
+            return vips_to_numpy(whole, format=self.format)
+        else:
+            whole = vips_to_numpy(whole, format=self.format)
+            if self.is_multiplex:
+                whole = blend_colors(whole, self.channel_colors, scale_by="clip")
+            return arr_to_pil(whole)
 
     def read_region(self, location, level, size, numpy=True):
         x, y = location
         if level > self.level_count:
-            level = self.level_count
+            level = self.level_count - 1
             print("pyramidal level was set to lowest...")
         w, h = size
         dim_0 = self.dimensions
@@ -238,29 +260,21 @@ class OpenOME:
             dim_level[level],
             integer=True,
         )
-        img = self.read_whole(level, numpy=False)
-        if x + w > img.width or y + h > img.height:
+        whole = self.open_vips(level=level)
+        if x + w > whole.width or y + h > whole.height:
             print(
-                f"crop region is out of image bounds {img.width} x {img.height}. size was set accordingly"
+                f"crop region is out of image bounds {whole.width} x {whole.height}. size was set accordingly"
             )
-            w = img.width - x
-            h = img.height - y
-        crop = img.crop(x, y, w, h)  # (x, y, w, h)
+            w = whole.width - x
+            h = whole.height - y
+        crop = whole.crop(x, y, w, h)  # (x, y, w, h)
         if numpy:
-            crop = crop.numpy()
-            if self.format == "ushort":
-                crop = convertScaleAbs(crop, alpha=(255.0 / 65535.0))
-        return crop
-
-    def check_if_rgb(self):
-        self.is_rgb = False
-        if self.pages == 1 and self.bands == 3:
-            self.is_rgb = True
-
-    def check_if_multiplex(self):
-        self.is_multiplex = False
-        if self.pages > 1 and self.bands == 1:
-            self.is_multiplex = True
+            return vips_to_numpy(crop, format=self.format)
+        else:
+            crop = vips_to_numpy(crop, format=self.format)
+            if self.is_multiplex:
+                crop = blend_colors(crop, self.channel_colors, scale_by="clip")
+            return arr_to_pil(crop)
 
     def get_thumbnail(self, size: tuple = (1024, 1024), numpy=False):
         if self.width > self.height:
@@ -273,9 +287,8 @@ class OpenOME:
         downsample_factor = max(
             dim / thumb for dim, thumb in zip(self.dimensions, thumbnail_dimensions)
         )
-        best_level = self.get_best_level_for_downsample(downsample_factor)
-        whole = self.read_whole(level=best_level, numpy=False)
-
+        best_level, _, _ = self.get_best_level_for_downsample(downsample_factor)
+        whole = self.open_vips(best_level)
         sacling_final = max(
             dim / thumb
             for dim, thumb in zip(
@@ -283,17 +296,13 @@ class OpenOME:
             )
         )
         thumbnail = whole.resize(1 / sacling_final)
-        thumbnail = thumbnail.numpy()
-        if self.format == "ushort":
-            thumbnail = convertScaleAbs(
-                thumbnail[:, :, : self.pages], alpha=(255.0 / 65535.0)
-            )
+        thumbnail = vips_to_numpy(thumbnail, format=self.format)
         if self.is_multiplex:
             thumbnail = blend_colors(thumbnail, self.channel_colors, scale_by="clip")
         if numpy:
             return thumbnail
         else:
-            return Image.fromarray(thumbnail)
+            return arr_to_pil(thumbnail)
 
     def get_single_channel_thumbnail(
         self,
@@ -316,9 +325,8 @@ class OpenOME:
         downsample_factor = max(
             dim / thumb for dim, thumb in zip(self.dimensions, thumbnail_dimensions)
         )
-        best_level = self.get_best_level_for_downsample(downsample_factor)
-        whole = self.read_whole(level=best_level, numpy=False)
-
+        best_level, _, _ = self.get_best_level_for_downsample(downsample_factor)
+        whole = self.open_vips(best_level)
         sacling_final = max(
             dim / thumb
             for dim, thumb in zip(
@@ -326,17 +334,11 @@ class OpenOME:
             )
         )
         thumbnail = whole.resize(1 / sacling_final)
-        thumbnail = thumbnail.numpy()
-        if self.format == "ushort":
-            thumbnail = convertScaleAbs(
-                thumbnail[:, :, : self.pages], alpha=(255.0 / 65535.0)
-            )
-
+        thumbnail = vips_to_numpy(thumbnail, format=self.format)
         if idx:
             color = self.channel_colors[idx]
             thumbnail = thumbnail[:, :, idx]
             thumbnail = blend_colors(thumbnail, color)
-
         if key:
             for idx, name in enumerate(self.channel_names):
                 if key in name:
@@ -351,33 +353,41 @@ class OpenOME:
         if numpy:
             return thumbnail
         else:
-            return Image.fromarray(thumbnail)
+            return arr_to_pil(thumbnail)
 
-    def get_best_level_for_downsample(self, downsample: float, tolerance: float = 0.01):
-        # First, check for an exact match within tolerance
+    def get_best_level_for_downsample(
+        self, ask_downsample: float, precision: float = 0.01
+    ):
         level_downsamples = self.level_downsamples
-
-        for level, level_downsample in enumerate(level_downsamples):
-            if abs(level_downsample - downsample) <= tolerance:
-                return level  # Exact match, no custom downsampling needed
-
-        if downsample >= level_downsamples[0]:
+        # First, check for a close match
+        for level_best, level_downsample in enumerate(level_downsamples):
+            if abs(level_downsample - ask_downsample) <= precision:
+                return (
+                    level_best,
+                    level_downsample,
+                    1,
+                )  # Exact match, no custom downsampling needed
+        # If not,
+        if ask_downsample >= level_downsamples[0]:
             # Downsampling: find the highest level_downsample less than or equal to the desired downsample
-            closest_level = None
+            level_best = None
             for level, level_downsample in enumerate(level_downsamples):
-                if level_downsample <= downsample:
-                    closest_level = level
+                if level_downsample <= ask_downsample:
+                    level_best = level
+                    resize_factor = level_downsample / ask_downsample
                 else:
-                    break  # Since level_downsamples are sorted, no need to check further
-            if closest_level is not None:
-                return closest_level
+                    break  # level_downsamples are sorted, no need to check further
+            if level_best is not None:
+                return level_best, level_downsamples[level_best], resize_factor
         else:
             # Upsampling: find the smallest level_downsample greater than or equal to the desired downsample
             for level, level_downsample in enumerate(level_downsamples):
-                if level_downsample >= downsample:
-                    return level
+                if level_downsample >= ask_downsample:
+                    resize_factor = ask_downsample / level_downsample
+                    return level, level_downsamples[level], resize_factor
+
         # If no suitable level is found, raise an error
-        raise ValueError(f"No suitable level found for downsample {downsample}.")
+        raise ValueError(f"No level found for downsample {ask_downsample}.")
 
 
 def get_xy_to(point, dim_from, dim_to, integer=True):
@@ -408,3 +418,14 @@ def read_ome_xml(xml, key, findall=True):
         return root.findall(search, namespace)
     else:
         return root.find(search, namespace)
+
+
+def vips_to_numpy(img, format):
+    arr = img.numpy()
+    if format == "ushort":
+        arr = convertScaleAbs(arr, alpha=(255.0 / 65535.0))
+    return arr
+
+
+def arr_to_pil(img):
+    return Image.fromarray(img, mode="RGB")

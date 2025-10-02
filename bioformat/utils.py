@@ -97,7 +97,6 @@ def check_is_ome(path):
     # ome_obj = get_ome_xml(path)
     # if ome_obj is None:
     # is_ome = False
-
     return is_ome
 
 
