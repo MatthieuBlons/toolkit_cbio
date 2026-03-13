@@ -1,5 +1,5 @@
 import torch
-from finetune.lora.models import HESingIF, load_model_from_path
+from finetune.lora.models import load_model_from_path
 from finetune.lora.utils import print_dict
 from finetune.lora.dataloader import Dataset_handler
 from tqdm import tqdm
@@ -151,17 +151,21 @@ def predict_one_image(model, image_path):
     return outputs_dict
 
 
-def main(model_path: str, img_dir: str, input_path: str | None = None, verbose=0):
+def main(model_path: str, img_dir: str, input_path: str | None = None, target_path: str | None = None, verbose=0):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     print(f"device used = {device}")
     model = load_model_from_path(model_path, device)
 
-    if model.network.lora and (verbose > 0):
+    if model.network.lora:
         model.network.print_lora_summary()
         model.network.print_summary(verbose=verbose)
     args = model.args
-    training_target = args.target_path
+
+    if target_path is not None:
+        training_target = target_path
+    else:
+        training_target = args.target_path
     with h5py.File(training_target, "r") as f:
         attrs = dict(f["signature"].attrs)
         features = attrs["feat"]

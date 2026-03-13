@@ -4,8 +4,6 @@ import torch
 import os
 from torchinfo import summary as model_summary
 from slide.utils import get_weights_path, get_model_path
-from timm.models import VisionTransformer, SwinTransformer
-from functools import partial
 
 """
 For the most part this file is a fork of https://github.com/mahmoodlab/TRIDENT/blob/main/trident/patch_encoder_models/load.py 
@@ -27,7 +25,7 @@ def get_encoder_mapping():
         "ctranspath": CTransPathInferenceEncoder,
         "hoptimus0": HOptimus0InferenceEncoder,
         "hoptimus1": HOptimus1InferenceEncoder,
-        "lora_hoptimus1": LoRAHOptimus1InferenceEncoder,
+        "PROiFHESi_H1": PROiFHESiH1InferenceEncoder,
         "musk": MuskInferenceEncoder,
         "phikon": PhikonInferenceEncoder,
         "phikon_v2": Phikonv2InferenceEncoder,
@@ -601,11 +599,11 @@ class HOptimus1InferenceEncoder(BasePatchEncoder):
         return model, eval_transform, precision
 
 
-class LoRAHOptimus1InferenceEncoder(BasePatchEncoder):
+class PROiFHESiH1InferenceEncoder(BasePatchEncoder):
 
     def _build(self, **kwargs):
-        from slide.tile_encoder.model_zoo.lora_hoptimus1.model import (
-            HESingIF,
+        from slide.tile_encoder.model_zoo.PROiFHESi_H1.model import (
+            HESingIF,  # to change name
             load_model_from_path,
         )
 
@@ -615,16 +613,16 @@ class LoRAHOptimus1InferenceEncoder(BasePatchEncoder):
             else kwargs.get("device", "cpu")
         )
         self.how = kwargs.get("embeddings", False)
-        model_path = get_model_path("tile", "lora_hoptimus1")
+        model_path = get_model_path("tile", "PROiFHESi_H1")
         # use load_model_from_path?
         model = load_model_from_path(model_path=model_path, device=self.device)
         network = model.network
 
         if self.how:
-            self.enc_name = "lora_hoptimus1_emb"
+            self.enc_name = "PROiFHESi_H1_emb"
             return network.backbone, network.transform, network.precision["backbone"]
         else:
-            self.enc_name = "lora_hoptimus1_out"
+            self.enc_name = "PROiFHESi_H1_out"
             return network, network.transform, model.precision["backbone"]
 
 
@@ -711,80 +709,3 @@ def get_eval_transforms(
     tforms = transforms.Compose(tforms)
 
     return tforms
-
-
-class LoRALayer(torch.nn.Module):
-    def __init__(self, in_dim, out_dim, rank, alpha):
-        super().__init__()
-        std = torch.sqrt(torch.tensor(rank).float())
-        self.A = torch.nn.Parameter(torch.randn(in_dim, rank) / std)
-        self.B = torch.nn.Parameter(torch.zeros(rank, out_dim))
-        self.alpha = alpha
-
-    def forward(self, x):
-        x = self.alpha * (x @ self.A @ self.B)
-        return x
-
-
-class QkvWithLoRA(torch.nn.Module):
-    def __init__(self, qkv, rank, alpha):
-        super().__init__()
-        self.qkv = qkv
-        self.dim = qkv.in_features
-        self.lora_q = LoRALayer(self.dim, self.dim, rank, alpha)
-        self.lora_v = LoRALayer(self.dim, self.dim, rank, alpha)
-
-    def forward(self, x):
-        qkv = self.qkv(x)
-        qkv[:, :, : self.dim] += self.lora_q(x)
-        qkv[:, :, -self.dim :] += self.lora_v(x)
-        return qkv
-
-
-class LinearWithLoRA(torch.nn.Module):
-    def __init__(self, linear, rank, alpha):
-        super().__init__()
-        self.linear = linear
-        self.lora = LoRALayer(linear.in_features, linear.out_features, rank, alpha)
-
-    def forward(self, x):
-        return self.linear(x) + self.lora(x)
-
-
-def apply_lora(model, rank, alpha):
-    # Add LoRA adapters to self-attention blocks (query, value)
-    if isinstance(model, VisionTransformer):
-        is_vit = True
-    elif isinstance(model, SwinTransformer):
-        is_vit = False
-    else:
-        raise NotImplementedError(
-            f"Lora implemented only for timm VisionTransformer and SwinTransformer, got {type(model)}"
-        )
-    assign_lora = partial(QkvWithLoRA, rank=rank, alpha=alpha)
-    if is_vit:
-        for block in model.blocks:
-            block.attn.qkv = assign_lora(block.attn.qkv)
-    else:
-        for layer in model.layers:
-            for block in layer.blocks:
-                block.attn.qkv = assign_lora(block.attn.qkv)
-
-    # Freeze all params
-    for param in model.parameters():
-        param.requires_grad = False
-
-    # Unfreeze LoRA layers
-    if is_vit:
-        for block in model.blocks:
-            for param in block.attn.qkv.lora_q.parameters():
-                param.requires_grad = True
-            for param in block.attn.qkv.lora_v.parameters():
-                param.requires_grad = True
-    else:
-        for layer in model.layers:
-            for block in layer.blocks:
-                for param in block.attn.qkv.lora_q.parameters():
-                    param.requires_grad = True
-                for param in block.attn.qkv.lora_v.parameters():
-                    param.requires_grad = True

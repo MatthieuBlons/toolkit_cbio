@@ -87,6 +87,7 @@ class OpenOME:
             self.pages = self.img.get("n-pages")
         if "bands" in fields:
             self.bands = self.img.get("bands")
+        # channel info when pages == 1 and bands > 4? multiplexed
         if self.pages > 1:
             channel_infos = self.get_channel_info()
             self.channel_colors = np.array(channel_infos["falsecolors"])
@@ -215,6 +216,8 @@ class OpenOME:
     def check_if_multiplex(self):
         self.is_multiplex = False
         if self.pages > 1 and self.bands == 1:
+            self.is_multiplex = True
+        elif self.pages == 1 and self.bands > 4:
             self.is_multiplex = True
 
     def open_vips(self, level):

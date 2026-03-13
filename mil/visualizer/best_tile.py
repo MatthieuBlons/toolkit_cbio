@@ -209,6 +209,7 @@ class TileSeeker(BaseTileVisualizer):
 
         self.classifier(x)
         logits = self.hooker.scores.squeeze()
+        proba = self.hooker.proba.squeeze()
 
         self.attention(x)
         tw = self.hooker.tiles_weights.squeeze()
@@ -229,6 +230,7 @@ class TileSeeker(BaseTileVisualizer):
             self.store_best(
                 x.cpu().numpy().squeeze(),
                 logits,
+                proba,
                 coords,
                 attrs,
                 selection,
@@ -244,6 +246,7 @@ class TileSeeker(BaseTileVisualizer):
         self,
         feats,
         logits,
+        proba,
         coords,
         attrs,
         selection,
@@ -265,8 +268,9 @@ class TileSeeker(BaseTileVisualizer):
             tmp_attentions,
             tmp_preclassifs,
             tmp_scores,
+            tmp_probas,
             tmp_images,
-        ) = (dict(), dict(), dict(), dict(), dict(), dict(), dict())
+        ) = (dict(), dict(), dict(), dict(), dict(), dict(), dict(), dict())
 
         for i, _ in enumerate(self.label_encoder.classes_):
             tmp_infos[i] = []
@@ -275,10 +279,8 @@ class TileSeeker(BaseTileVisualizer):
             tmp_attentions[i] = []
             tmp_preclassifs[i] = []
             tmp_scores[i] = []
-
+            tmp_probas[i] = []
             tmp_images[i] = []
-
-        # patcher = self._init_patcher(attrs["name"])
 
         ## Selects the best tiles per WSI.
         for candidate in range(coords.shape[0]):
@@ -287,10 +289,10 @@ class TileSeeker(BaseTileVisualizer):
 
             # for each class
             for i, _ in enumerate(self.label_encoder.classes_):
-                # If the score for class o at tile s is bigger than the smallest
+                # If the proba for class o at tile s is bigger than the smallest
                 # stored value: put in storage
                 if (len(self.store_score[i]) < self.n_best) or (
-                    sgn * logits[candidate, i] >= sgn * self.store_score[i][0]
+                    proba[candidate, i] >= self.store_proba[i][0]
                 ):
                     tmp_infos[i].append(attrs)
                     tmp_coords[i].append(coords[candidate, :])
@@ -298,24 +300,24 @@ class TileSeeker(BaseTileVisualizer):
                     tmp_attentions[i].append(self.hooker.tiles_weights[candidate])
                     tmp_preclassifs[i].append(self.hooker.reprewsi[candidate, :])
                     tmp_scores[i].append(logits[candidate, i])
-
-                    # tmp_images[i].append(patcher.get_tile(*patcher.valid_patches[candidate]))
+                    tmp_probas[i].append(proba[candidate, i])
 
         # add the max_per_slides best tiles per WSI to storage.
         for i, _ in enumerate(self.label_encoder.classes_):
-            selection = np.argsort(tmp_scores[i])[::-sgn][: self.max_per_slides]
+            selection = np.argsort(tmp_probas[i])[::sgn][-self.max_per_slides :]
+
             self.store_info[i] += list(np.array(tmp_infos[i])[selection])
             self.store_coords[i] += list(np.array(tmp_coords[i])[selection])
             self.store_feat[i] += list(np.array(tmp_feats[i])[selection])
             self.store_attention[i] += list(np.array(tmp_attentions[i])[selection])
             self.store_preclassif[i] += list(np.array(tmp_preclassifs[i])[selection])
             self.store_score[i] += list(np.array(tmp_scores[i])[selection])
-
-            # self.store_image[i] += list(np.array(tmp_images[i])[selection])
+            self.store_proba[i] += list(np.array(tmp_probas[i])[selection])
 
         # Selects the n_best best tiles overall.
         for i, _ in enumerate(self.label_encoder.classes_):
-            indices_best = np.argsort(self.store_score[i])[::sgn][-self.n_best :]
+            indices_best = np.argsort(self.store_proba[i])[::sgn][-self.n_best :]
+
             self.store_info[i] = list(np.array(self.store_info[i])[indices_best])
             self.store_coords[i] = list(np.array(self.store_coords[i])[indices_best])
             self.store_feat[i] = list(np.array(self.store_feat[i])[indices_best])
@@ -326,13 +328,12 @@ class TileSeeker(BaseTileVisualizer):
                 np.array(self.store_preclassif[i])[indices_best]
             )
             self.store_score[i] = list(np.array(self.store_score[i])[indices_best])
-
-            # self.store_image[i] = list(np.array(self.store_image[i])[indices_best])
+            self.store_proba[i] = list(np.array(self.store_proba[i])[indices_best])
 
     def summarise_storage(self):
         # fetch a tile idx for easy identification
         summary = pd.DataFrame()
-        for i, _ in enumerate(self.label_encoder.classes_):
+        for i, label in enumerate(self.label_encoder.classes_):
             meta_df = pd.DataFrame(self.store_info[i])
             coords_df = pd.DataFrame(self.store_coords[i], columns=["x", "y", "w", "h"])
             merged_df = pd.merge(
@@ -357,8 +358,9 @@ class TileSeeker(BaseTileVisualizer):
                 ),
             )
             merged_df["attention score"] = self.store_attention[i]
-            merged_df["class label"] = i
+            merged_df["class label"] = label
             merged_df["class score"] = self.store_score[i]
+            merged_df["class proba"] = self.store_proba[i]
             summary = pd.concat([summary, merged_df], axis=0)
 
         return summary
@@ -392,6 +394,7 @@ class TileSeeker(BaseTileVisualizer):
         self.store_attention = dict()
         self.store_preclassif = dict()
         self.store_score = dict()
+        self.store_proba = dict()
 
         for i, _ in enumerate(self.label_encoder.classes_):
             self.store_info[i] = []
@@ -401,6 +404,7 @@ class TileSeeker(BaseTileVisualizer):
             self.store_attention[i] = []
             self.store_preclassif[i] = []
             self.store_score[i] = []
+            self.store_proba[i] = []
 
 
 class ConsensusTileSeeker(TileSeeker):
@@ -473,6 +477,7 @@ class ConsensusTileSeeker(TileSeeker):
         outs = []
         lastrepr = []
         logits = []
+        proba = []
         attention = []
 
         for s in self.seekers:
@@ -481,12 +486,14 @@ class ConsensusTileSeeker(TileSeeker):
                 if test_fold == s.model.args.test_fold:
                     outs.append(s.classifier(x).cpu().numpy())
                     logits.append(s.hooker.scores.squeeze())
+                    proba.append(s.hooker.proba.squeeze())
                     lastrepr.append(s.hooker.reprewsi.squeeze())
                     s.attention(x)
                     attention.append(s.hooker.tiles_weights.squeeze())
             except:
                 outs.append(s.classifier(x).cpu().numpy())
                 logits.append(s.hooker.scores.squeeze())
+                proba.append(s.hooker.proba.squeeze())
                 lastrepr.append(s.hooker.reprewsi.squeeze())
                 s.attention(x)
                 attention.append(s.hooker.tiles_weights.squeeze())
@@ -494,11 +501,13 @@ class ConsensusTileSeeker(TileSeeker):
         out = np.mean(outs, 0)
         lastrepr = np.mean(lastrepr, 0)
         logits = np.mean(logits, 0)
+        proba = np.mean(proba, 0)
         tw = np.mean(attention, 0)
 
         # filling the hooker with mean values
         self.hooker.tiles_weights = tw
         self.hooker.scores = logits
+        self.hooker.proba = proba
         self.hooker.reprewsi = lastrepr
 
         ## Otsu thresholding
@@ -518,6 +527,7 @@ class ConsensusTileSeeker(TileSeeker):
             self.store_best(
                 x.cpu().numpy().squeeze(),
                 logits,
+                proba,
                 coords,
                 attrs,
                 selection,
@@ -577,6 +587,7 @@ class HeatmapMaker(BaseTileVisualizer):
         x = self._preprocess(ID, expand_bs=False)
         outs = []
         logits = []
+        proba = []
         attention = []
         for s in self.seekers:
             try:
@@ -584,24 +595,28 @@ class HeatmapMaker(BaseTileVisualizer):
                 if test_fold == s.model.args.test_fold:
                     outs.append(s.classifier(x).cpu().numpy())
                     logits.append(s.hooker.scores.squeeze())
+                    proba.append(s.hooker.proba.squeeze())
                     s.attention(x.unsqueeze(0))
                     attention.append(s.hooker.tiles_weights.squeeze())
             except:
                 print(f"slide: {ID} not in test, will use all the models provided")
                 outs.append(s.classifier(x).cpu().numpy())
                 logits.append(s.hooker.scores.squeeze())
+                proba.append(s.hooker.proba.squeeze())
                 s.attention(x.unsqueeze(0))
                 attention.append(s.hooker.tiles_weights.squeeze())
 
         out = np.mean(outs, 0)
         logits = np.mean(logits, 0)
+        proba = np.mean(proba, 0)
         tw = np.squeeze(np.mean(attention, 0))
 
-        return tw, logits, attrs, coords
+        return tw, logits, proba, attrs, coords
 
     def make_montage(
         self,
         ID,
+        by: str = "proba",
         downsample: int = 1,
         smooth: int = 0,
         alpha: float = 0.5,
@@ -614,11 +629,14 @@ class HeatmapMaker(BaseTileVisualizer):
         """
         overlays = {}
         slide = self._get_slide(ID)
-        tw, logits, attrs, coords = self.forward(ID)
+        tw, logits, proba, attrs, coords = self.forward(ID)
         (level_width, level_height) = slide.level_dimensions[attrs["level"]]
-        thumbnail = self._get_thumbnail(
-            ID, (level_width / downsample, level_height / downsample), numpy=True
+
+        thumbnail = slide.get_thumbnail(
+            (int(level_width / downsample), int(level_height / downsample))
         )
+        thumbnail = np.array(thumbnail)[:, :, :3]
+
         thumbnail_height, thumbnail_width, _ = thumbnail.shape
         thumbnail_patch_size = max(1, int(attrs["level_patch_size"] / downsample))
         thumbnail_coords = np.zeros_like(coords)
@@ -635,7 +653,10 @@ class HeatmapMaker(BaseTileVisualizer):
         for i, target in enumerate(self.label_encoder.classes_):
             # Softmax the attention scores
             maxtw = softmax(tw)
-            class_scores = maxtw * logits[:, i]
+            if by == "proba":
+                class_scores = maxtw * proba[:, i]
+            elif by == "logits":
+                class_scores = maxtw * logits[:, i]
             heatmaps_class, background = self.fill_heatmap(
                 size=(thumbnail_width, thumbnail_height),
                 xywh=thumbnail_coords,

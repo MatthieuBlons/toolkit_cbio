@@ -2,7 +2,21 @@ from finetune.lora.arguments import get_arguments
 from finetune.lora.models import HESingIF
 import numpy as np
 import torch
+import wandb
+import signal
 from tqdm import tqdm
+import os
+import sys
+
+
+def handle_exit(signum, frame):
+    print(f"[INFO] Caught signal {signum}, finishing wandb run...")
+    wandb.finish()
+    sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, handle_exit)
+signal.signal(signal.SIGINT, handle_exit)
 
 
 def writes_metrics(writer, to_write, epoch):
@@ -29,21 +43,29 @@ def train(model, dataloader):
     progress = tqdm(
         desc=f"training...",
         total=len(dataloader),
-        unit="batch",
+        unit="step",
         initial=0,
         leave=False,
     )
-
     for input_batch, target_batch in dataloader:
         # Feed the network with a batch and optimize the parameter
-        model.counter["batch"] += 1
         model.counter["epoch"] += epobatch
+        model.counter["step"] += 1
         loss = model.optimize_parameters(input_batch, target_batch)
         mean_loss.append(loss)
         progress.set_postfix_str(
             f"{model.args.criterion} loss = {loss:.4}", refresh=True
         )
         progress.update()
+        if model.counter["step"] % 100 == 0:
+            wandb.log(
+                {
+                    "train_loss": loss,
+                    "lr": model.schedulers[0]._last_lr[0],
+                },
+                step=model.counter["step"],
+            )
+    
     progress.close()
     model.mean_train_loss = np.mean(mean_loss)
 
@@ -55,7 +77,7 @@ def val(model, dataloader):
     progress = tqdm(
         desc=f"validation...",
         total=len(dataloader),
-        unit="batch",
+        unit="step",
         initial=0,
         leave=False,
     )
@@ -68,9 +90,17 @@ def val(model, dataloader):
             f"{model.args.criterion} loss = {loss:.4}", refresh=True
         )
         progress.update()
+
     progress.close()
     model.mean_val_loss = np.mean(mean_loss)
     to_write = model.flush_val_metrics()
+    wandb.log(
+        {
+            **to_write,
+            "epoch": model.counter["epoch"],
+        },
+        step=model.counter["step"],
+    )
     writes_metrics(model.writer, to_write, model.counter["epoch"])
     state = model.make_state()
 
@@ -81,8 +111,20 @@ def val(model, dataloader):
     model.early_stopping(model.args.sgn_metric * to_write[model.args.ref_metric], state)
 
 
-def main(known_args=None, verbose=False):
+def main(project, job, known_args=None, verbose=False):
     args = get_arguments(known_args=known_args, train=True)
+
+    if int(os.environ.get("RANK", 0)) == 0:
+        wandb.init(
+            project=project,
+            group=job,
+            name=f"test_{args.test_fold}_rep_{args.repeat}",
+            config=vars(args),
+            reinit="return_previous",
+        )
+    else:
+        wandb.init(mode="disabled")
+
     model = HESingIF(args=args, with_data=True)
     model.get_summary_writer()
     progress = tqdm(
@@ -112,4 +154,6 @@ def main(known_args=None, verbose=False):
         progress.update()
     stop_epoch = int(model.counter["epoch"])
     model.writer.close()
+
+    wandb.finish()
     return stop_epoch

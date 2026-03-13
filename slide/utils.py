@@ -1,13 +1,7 @@
 import os
-import matplotlib.pyplot as plt
 import numpy as np
 from openslide import OpenSlide
-from skimage.color import rgb2gray
-from skimage.morphology import square, closing, opening
-from skimage.filters import threshold_otsu
-import warnings
 import itertools
-import osfile.manager as fm
 from bioformat.utils import check_is_ome
 from bioformat.reader import OpenOME
 from slide.reader import OpenWSI
@@ -34,18 +28,50 @@ def openslide_metadata_to_xml(path):
     return "Not implemented yet"
 
 
-def get_slide_name_extension(path):
+def get_slide_name_extension(path) -> tuple[str, str]:
+    """Get slide extension form path.
+
+    Args:
+        path (str):
+            path to slide
+
+    Returns:
+        tuple:
+            (name, ext): basename and extension of slide
+    """
     name, ext = os.path.splitext(os.path.basename(path))
     return name, ext
 
 
 def check_to_use_openslide(path):
+    """Check if slide can be open with openslide.Openslide.
+
+    Args:
+        path (str):
+            path to slide
+
+    Returns:
+        bool:
+            is openslide.Openslide compatible
+    """
     _, ext = get_slide_name_extension(path)
     use_openslide = ext.lower() in OPENSLIDE_READABLE_FORMATS
     return use_openslide
 
 
 def get_slide_reader(path):
+    """
+    Get proper reader tool to open slide.
+
+    Args:
+        path (str):
+            path to slide
+
+    Returns:
+        class:
+            slide reader tool.
+    """
+
     if check_is_ome(path):
         return OpenOME
     elif check_to_use_openslide(path):
@@ -76,54 +102,6 @@ def get_openslide_pyramid_info(slide, verbose=False):
     if verbose:
         print(infos)
     return infos
-
-
-# make thumbnail for opensilde
-def make_openslide_thumbnail(
-    scr, dst=None, level=0, format="ndpi", grayscale=False, verbose=True
-):
-    files, cnt = fm.findFile(scr, format, fileExtensions=True)
-    if verbose:
-        print(f"{cnt} WSI.{format} were found in source dir: {scr}")
-    # Make dst folders if not aready exist
-    if not dst:
-        dst = os.path.join(scr, f"visu_slide")
-    if not os.path.exists(dst):
-        os.makedirs(dst, exist_ok=True)
-    # Iterate over files found in scr
-    for file in files:
-        filename, _ = os.path.splitext(file)
-        tag = os.path.basename(filename)
-        # Slide view
-        # Get WSI (use function get_slice, get image)
-        wsi_np = get_slide_whole(file, level=level)
-        if grayscale:
-            wsi_np = (rgb2gray(wsi_np).astype("float32") - 1) * -1
-        wsi_size = wsi_np.shape
-        wsi_aspect = wsi_size[1] / wsi_size[0]
-        fig, ax = plt.subplots(
-            1, 1, figsize=(12, 12 / wsi_aspect), layout="constrained"
-        )
-        ax.set_title(f"{tag} at level={level}")
-        ax.imshow(wsi_np)
-        ax.axis("off")
-        fig.savefig(os.path.join(dst, f"{tag}_slide_level_{level}.png"))
-        plt.close()
-        if verbose:
-            print(f"slide thumbnail saved in {dst}")
-        # Auto Mask view
-        # get binary mask for tissue segementation (use function make_auto_mask)
-        mask = make_auto_mask(file, mask_level=level)
-        fig, ax = plt.subplots(
-            1, 1, figsize=(12, 12 / wsi_aspect), layout="constrained"
-        )
-        ax.set_title(f"{tag} tissue mask at level={level}")
-        ax.imshow(mask)
-        ax.axis("off")
-        fig.savefig(os.path.join(dst, f"{tag}_mask_level_{level}.png"))
-        plt.close()
-        if verbose:
-            print(f"mask thumbnail saved in {dst}")
 
 
 def get_slide_whole(slide, level=None, numpy=True):
@@ -224,36 +202,6 @@ def get_x_y_to(point, dim_from, dim_to, integer=True):
     return point_l
 
 
-def make_auto_mask(slide, mask_level, margin=(0, 0)):
-    img = slide.read_region((0, 0), mask_level, slide.level_dimensions[mask_level])
-    if not isinstance(img, np.ndarray):
-        img = np.array(img)[:, :, :3]
-    img_gray = rgb2gray(img)
-    img_gray = clear_border(img_gray, margin=margin)
-    size = img_gray.shape
-    img_gray = img_gray.flatten()
-    pixels_int = img_gray[np.logical_and(img_gray > 0.1, img_gray < 0.98)]
-    t = threshold_otsu(pixels_int)
-    mask = opening(
-        closing(
-            np.logical_and(img_gray < t, img_gray > 0.1).reshape(size),
-            footprint=square(2),
-        ),
-        footprint=square(2),
-    )
-    return mask
-
-
-def clear_border(mask, margin):
-    r, c = mask.shape
-    mr, mc = margin
-    mask[:mr, :] = 0
-    mask[r - mr :, :] = 0
-    mask[:, :mc] = 0
-    mask[:, c - mc :] = 0
-    return mask
-
-
 def grid_blob(point_start, point_end, space):
     """
     Returns:
@@ -265,60 +213,11 @@ def grid_blob(point_start, point_end, space):
     return list(itertools.product(list_x, list_y))
 
 
-def check_borders_correct(array_np, point):
-    shape = array_np.shape
-    if point[0] < 0 or point[1] < 0 or point[0] > shape[0] or point[1] > shape[1]:
-        x, y = point
-        x = max(0, x)
-        y = max(0, y)
-        x = min(shape[0], x)
-        y = min(shape[1], y)
-        warnings.warn("Invalid point: {}, corrected to {}".format(point, (x, y)))
-        point = (x, y)
-    return point
-
-
-def pj_slice(array_np, point_0, point_1=None):
-    """
-    Returns:
-        If point_1 is None, returns array_np evaluated in point_0,
-        else returns a slice of array_np between point_0 and point_1.
-    """
-    x_0, y_0 = check_borders_correct(array_np, point_0)
-    if point_1 is None:
-        result = array_np[x_0, y_0]
-    else:
-        x_1, y_1 = check_borders_correct(array_np, point_1)
-        if x_0 > x_1:
-            warnings.warn(
-                "Invalid x_axis slicing, \
-                point_0: {} and point_1: {}".format(
-                    point_0, point_1
-                )
-            )
-        if y_0 > y_1:
-            warnings.warn(
-                "Invalid y_axis slicing, \
-                point_0: {} and point_1: {}".format(
-                    point_0, point_1
-                )
-            )
-        result = array_np[x_0:x_1, y_0:y_1]
-    return result
-
-
-def mask_percentage(mask, point, radius, mask_tolerance=0.5):
-    """
-    Returns:
-        A boolean. If True, keep, else discard
-    """
-    sub_mask = pj_slice(mask, point - radius, point + radius + 1)
-    score = sub_mask.sum() / (sub_mask.shape[0] * sub_mask.shape[1])
-    accepted = score > mask_tolerance
-    return accepted
-
-
 def get_bag_of_tiles(slide, xywh, res_to_view=0):
+    """
+    Returns:
+        List of tiles at xywh, extracted from slide.
+    """
     bag = []
     if isinstance(slide, str):
         reader = get_slide_reader(slide)
@@ -337,48 +236,96 @@ def get_bag_of_tiles(slide, xywh, res_to_view=0):
         return bag
 
 
-def read_h5_coords(coords_path):
-    with h5py.File(coords_path, "r") as f:
+def read_h5_coords(coords_path, mode: str = "r") -> tuple[dict, np.ndarray]:
+    """
+    Get coordinates of the tiles from a HDF5 .h5 file.
+
+    Args:
+        coords_path:    str, path to the .h5 file containing the coordinates of the tile.
+
+    Returns:
+        attrs:          dict, dictionary containing the attributes of the coordinates of the tiles.
+        coords:         np.ndarray, array containing the coordinates of the tiles.
+
+    """
+    with h5py.File(coords_path, mode) as f:
         attrs = dict(f["coords"].attrs)
         coords = f["coords"][:]
     return attrs, coords
 
 
-def read_h5_features(embs_path):
-    with h5py.File(embs_path, "r") as f:
-        attrs = dict(f["features"].attrs)
-        feats = f["features"][:]
+def read_h5_features(embs_path: str, mode: str = "r") -> tuple[dict, np.ndarray]:
+    """
+    Get embeddings and attributes from a WSI embedding file.
+
+    Args:
+        embs_path:      str, path to the WSI embedding file.
+        wsi_enc:        str, level of WSI encoding used, default='tile'.
+
+    Returns:
+        attrs:      dict, dictionary containing the corresponding WSI attributes.
+        feats:      np.ndarray, size (n_tiles, dim_feats), array containing the WSI embeddings.
+
+    """
+    # Defining key for retrieving the embeddings in h5 file
+    feat_key = "features"
+
+    # Retrieving attributes and features
+    with h5py.File(embs_path, mode) as f:
+        attrs = dict(f[feat_key].attrs)
+        feats = f[feat_key][:]
+
+    # Returning attributes and features
     return attrs, feats
 
 
-def read_csv_coords(coords_path):
-    coords = pd.read_csv(coords_path)
-    return coords.to_numpy()
+def read_csv_coords(coords_path: str) -> np.ndarray:
+    """
+    Get coordinates from a CSV file found at coords_path, including the .csv extension.
+
+    Args:
+        coords_path:    str, path to the CSV file, including the .csv extension.
+
+    Returns:
+        coords:         np.ndarray, array containing the coordinates of the tiles.
+
+    """
+    return pd.read_csv(coords_path).to_numpy()
 
 
-def read_array_coords(coords_path):
-    return 0
-
-
-def save_csv():
+def read_array_coords(path):
     return "Not implemented yet"
 
 
-def save_np():
+def save_csv(path):
     return "Not implemented yet"
 
 
-def save_pickel():
+def save_np(path):
     return "Not implemented yet"
 
 
-def print_attrs(name, obj):
+def save_pickel(path):
+    return "Not implemented yet"
+
+
+def print_attrs(obj, name=None):
+    """Print attributes from an object
+
+    Returns:
+        None
+    """
     print(f"Object: {name}")
     for key, value in obj.attrs.items():
         print(f"    Attribute - {key}: {value}")
 
 
 def print_dict(dict, name=None):
+    """Print dictionary content
+
+    Returns:
+        None
+    """
     if name:
         print(f"In {name}: ")
     else:
@@ -388,7 +335,7 @@ def print_dict(dict, name=None):
 
 
 # taken from https://github.com/mahmoodlab/TRIDENT
-def save_h5(save_path, assets, attributes=None, mode="w"):
+def save_h5(save_path, assets, attributes=None, mode="a"):
     """
     The `save_h5` function saves a dictionary of assets to an HDF5 file. This is commonly used to store
     large datasets or hierarchical data structures in a compact and organized format.
@@ -494,6 +441,7 @@ def get_weights_path(encoder_type, encoder_name):
             f"WARNING: Path at '{path}' does not exist. Please double-check the registry in '{registry_path}'"
         )
     return path
+
 
 def get_model_path(encoder_type, encoder_name):
     """

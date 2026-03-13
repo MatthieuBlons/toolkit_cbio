@@ -5,7 +5,6 @@ Just predicts, given a set of WSI.
 import numpy as np
 from glob import glob
 import torch
-import pandas as pd
 import os
 from .models import DeepMIL
 from sklearn.preprocessing import Normalizer
@@ -20,7 +19,8 @@ def load_model(model_path, device):
     args = checkpoint["args"]
     args.device = device
     model = DeepMIL(
-        args, label_encoder=checkpoint["label_encoder"], ipca=None
+        args,
+        label_encoder=checkpoint["label_encoder"],
     )
     model.network.load_state_dict(checkpoint["state_dict"])
     model.network.eval()

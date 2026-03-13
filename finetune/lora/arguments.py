@@ -115,6 +115,12 @@ def get_arguments(known_args=None, train=True, config=None):
         help="LoRA alpha",
     )
     parser.add_argument(
+        "--lora_target",
+        nargs="+",
+        default=["qkv"],
+        help="LoRA target modules",
+    )
+    parser.add_argument(
         "--feature_dim",
         type=int,
         default=1536,
@@ -182,7 +188,8 @@ def get_arguments(known_args=None, train=True, config=None):
 
     parser.add_argument("--lr", type=float, help="learning rate", default=0.003)
 
-    parser.add_argument("--lr_scheduler", type=str, default="cos")
+    # linear is not the best name 
+    parser.add_argument("--lr_scheduler", type=str, default="cos", choices=["cos", "linear"])
 
     parser.add_argument(
         "--patience_lr",

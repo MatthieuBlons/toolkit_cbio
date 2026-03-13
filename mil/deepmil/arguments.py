@@ -16,10 +16,17 @@ def get_arguments(known_args=None, train=True, config=None):
     )
 
     parser.add_argument(
+        "--wsi_format",
+        type=str,
+        default="h5",
+        help="embeddings file format",
+    )
+
+    parser.add_argument(
         "--wsi_enc",
         type=str,
         default="tile",
-        help="Level of wsi encoding. Either 'tile' or 'slide'.",
+        help="Level of wsi encoding.",
     )
 
     parser.add_argument(
@@ -131,7 +138,7 @@ def get_arguments(known_args=None, train=True, config=None):
         "--model",
         type=str,
         default="mhmc",
-        choices=["mhmc", "mlp"],
+        choices=["mhmc"],
         help="name of the model used.",
     )
 
@@ -195,12 +202,20 @@ def get_arguments(known_args=None, train=True, config=None):
         default=512,
     )
 
+    parser.add_argument(
+        "--output_layer",
+        type=str,
+        default="logsoftmax",
+        choices=["logsoftmax", "softmax", None],
+        help="name of the model used.",
+    )
+
     parser.add_argument("--dropout", type=float, help="dropout parameter", default=0.4)
 
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=16,
+        default=1,
         help="Batch Size = how many WSI in a batch",
     )
 
@@ -255,7 +270,11 @@ def get_arguments(known_args=None, train=True, config=None):
     args.num_class = len(set(target_table[args.target_name]))
     args.train = train
     args.patience = args.epochs if args.patience is None else args.patience
-    args.patience_lr = None if args.lr_scheduler == "cos" else args.patience_lr
+
+    if args.lr_scheduler == "cos":
+        args.patience_lr = None
+    elif args.lr_scheduler == "linear" & args.patience_lr is None:
+        args.patience_lr = args.epochs
 
     assert (
         args.feature_dim <= args.encoder_dim
@@ -266,17 +285,11 @@ def get_arguments(known_args=None, train=True, config=None):
         args.feature_depth = args.feature_dim
 
     # Set constant size flag
-    if args.wsi_enc == "tile":
-        if args.n_tiles == 0 or args.sampler != "random":
-            args.constant_size = False
-        else:
-            args.constant_size = True
-    elif args.wsi_enc == "slide":
-        args.n_tiles == 0
-        args.sampler == "all"
+
+    if args.n_tiles == 0 or args.sampler != "random":
+        args.constant_size = False
+    else:
         args.constant_size = True
-        if args.batch_size == 1:
-            args.constant_size = False
 
     # Sgn_metric used to orient the early stopping and writing process.
     if args.ref_metric == "loss":

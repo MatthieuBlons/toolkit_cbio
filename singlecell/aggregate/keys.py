@@ -19,6 +19,59 @@ KEYS_ORION = {
         "SMA+",
     ],
 }
+KEYS_MIPHE = {
+    "intensity": [],
+    "one-hot": [
+        "CD45+",
+        "CD68+",
+        "CD163+",
+        "CD3e+",
+        "CD8a+",
+        "CD45R0+",
+        "CD20+",
+        "CD4+",
+        "FOXP3+",
+        "PDL1+",
+        "Ki67+",
+        "PanCK+",
+        "Ecadherin+",
+        "CD31+",
+        "SMA+",
+        "PD1+",
+        "ALL-",
+    ],
+}
+KEYS_MIPHE_PRED = {
+    "intensity": [
+        "CD31_pred",
+        "CD45_pred",
+        "CD68_pred",
+        "CD4_pred",
+        "FOXP3_pred",
+        "CD8a_pred",
+        "CD45RO_pred",
+        "CD20_pred",
+        "PD-L1_pred",
+        "SMA_pred",
+    ],
+    "one-hot": [
+        "CD45+",
+        "CD68+",
+        "CD163+",
+        "CD3e+",
+        "CD8a+",
+        "CD45R0+",
+        "CD20+",
+        "CD4+",
+        "FOXP3+",
+        "PDL1+",
+        "Ki67+",
+        "PanCK+",
+        "Ecadherin+",
+        "CD31+",
+        "SMA+",
+    ],
+}
 
 KEYS_TIPIT = {
     "one-hot": [

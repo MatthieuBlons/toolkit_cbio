@@ -1,9 +1,7 @@
 from sklearn.decomposition import IncrementalPCA
 import numpy as np
 from tqdm import tqdm
-import argparse
 from glob import glob
-from joblib import dump
 import os
 from slide.utils import read_h5_features
 
@@ -30,12 +28,26 @@ def check_batch(batch):
         ans = False
     return ans
 
+
 def get_feat_files(feat_dir):
-    files = glob(os.path.join(feat_dir,'*.h5'))
+    files = glob(os.path.join(feat_dir, "*.h5"))
     return files
 
 
 def fit(feat_dir):
+    """fit PCA to .h5 feature data.
+
+    Parameters
+    ----------
+    feat_dir : str
+        directory where features files are stored.
+
+    Returns
+    -------
+    bool
+        files:  name of processed files
+        ipca:   fitted ipca
+    """
     files = get_feat_files(feat_dir)
     ipca = IncrementalPCA()
     batch = []

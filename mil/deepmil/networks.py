@@ -13,6 +13,7 @@ from torch.nn import (
     Conv1d,
     Conv2d,
     ReLU,
+    GELU,
     Dropout,
     BatchNorm1d,
     BatchNorm2d,
@@ -48,7 +49,7 @@ class Linear_norm(Module):
         self.cs = constant_size
         self.block = Sequential(
             Linear(in_features, out_features),
-            ReLU(),  # Added 25/09
+            GELU(),  # Added 25/09
             Dropout(p=dropout),  # Added 25/09
             self.get_norm(constant_size, dim_batch),
         )
@@ -109,7 +110,7 @@ class Linear_bn(Module):
         self.layer = Sequential(
             Linear(in_features=in_channels, out_features=out_channels),
             self.norm_layer(out_channels),
-            ReLU(),
+            GELU(),
             Dropout(p=dropout),
         )
 
@@ -269,44 +270,51 @@ class MLP(Module):
     def __init__(self, args):
         super(MLP, self).__init__()
         self.args = args
-        self.dropout = args.dropout
-        self.width_fe = is_in_args(args, "width_fe", 64)
-        self.feature_dim = is_in_args(args, "feature_dim", 512)
+        self.dropout = is_in_args(args, "dropout", 0.1)
+        self.feature_dim = is_in_args(args, "feature_dim", 1536)
         self.feature_depth = is_in_args(args, "feature_depth", 512)
+        self.width_fe = is_in_args(args, "width_fe", 512)
+        self.n_layers_classif = is_in_args(args, "n_layers_classif", 0)
+        self.output_layer = is_in_args(args, "output_layer", None)
         self.num_class = is_in_args(args, "num_class", 2)
-        self.n_layers_classif = is_in_args(args, "n_layers_classif", 1)
-
         self.transform = self.instance_transf()
         self.classifier = self.mlp_classifier()
 
     def instance_transf(self):
-        # Do we want batch norm on the enc?
-        # transform = Linear_norm(self.feature_dim,self.feature_depth,self.dropout,self.args.constant_size,)
-        transform = Sequential(
-            Linear(self.feature_dim, self.feature_depth),
-            ReLU(),
-            Dropout(p=self.dropout),
+        transform = Linear_norm(
+            in_features=self.feature_dim,
+            out_features=self.feature_depth,
+            dropout=0.1,
+            constant_size=args.constant_size,
         )
         return transform
 
     def mlp_classifier(self):
         classifier = []
-        classifier.append(
-            Linear_norm(
-                int(self.feature_depth),
-                self.width_fe,
-                self.dropout,
-                self.args.constant_size,
-            )
-        )
-        for i in range(self.n_layers_classif):
+        if self.n_layers_classif > 0:
             classifier.append(
                 Linear_norm(
-                    self.width_fe, self.width_fe, self.dropout, self.args.constant_size
+                    self.feature_depth,
+                    self.width_fe,
+                    self.dropout,
+                    self.args.constant_size,
                 )
             )
-        classifier.append(Linear(self.width_fe, self.num_class))
-        classifier.append(LogSoftmax(-1))
+            for i in range(self.n_layers_classif - 1):
+                classifier.append(
+                    Linear_norm(
+                        self.width_fe, self.width_fe, self.dropout, args.constant_size
+                    )
+                )
+            classifier.append(Linear(self.width_fe, self.num_class))
+        else:
+            classifier.append(Linear(self.feature_depth, self.num_class))
+
+        if self.output_layer == "pseudo_proba":
+            classifier.append(LogSoftmax(-1))
+        elif self.output_layer == "proba":
+            classifier.append(Softmax(-1))
+
         return Sequential(*classifier)
 
     def forward(self, x):
@@ -329,57 +337,60 @@ class MLP(Module):
 
 class MHMClayers(Module):
     """
-    MultiHeadMultiClass attention MIL, with several layers in the decision MLP.
-    Same as MultiHeadedAttentionMIL_multiclass but have a classifier with N
-    Linear layers.
-    N is parametrized by args by args.n_layers_classif
+    MultiHeadMultiClass attention MIL,
+    with Linear layers in pre- and post-attention modules.
+
     """
 
     def __init__(self, args):
         super(MHMClayers, self).__init__()
         self.args = args
-        self.dropout = args.dropout
-        self.width_fe = is_in_args(args, "width_fe", 64)
-        self.atn_dim = is_in_args(args, "atn_dim", 256)
-        self.feature_dim = is_in_args(args, "feature_dim", 512)
+        self.dropout = is_in_args(args, "dropout", 0.25)
+        self.feature_dim = is_in_args(args, "feature_dim", 1536)
         self.feature_depth = is_in_args(args, "feature_depth", 512)
+        self.atn_dim = is_in_args(args, "atn_dim", 256)
         self.num_heads = is_in_args(args, "num_heads", 1)
-        self.num_class = is_in_args(args, "num_class", 2)
+        self.width_fe = is_in_args(args, "width_fe", 512)
         self.n_layers_classif = is_in_args(args, "n_layers_classif", 1)
+        self.output_layer = is_in_args(args, "output_layer", "logsoftmax")
+        self.num_class = is_in_args(args, "num_class", 1)
         self.dim_heads = self.atn_dim // self.num_heads
         assert (
             self.dim_heads * self.num_heads == self.atn_dim
         ), "atn_dim must be divisible by num_heads"
-
-        # make a function
-        # do I want to normalise on args.n_tiles when args.constant_size
-        # self.instance_transf = Linear_norm(self.feature_dim, self.feature_depth, self.dropout, args.constant_size,)
-        self.instance_transf = Sequential(
-            Linear(self.feature_dim, self.feature_depth),
-            ReLU(),
-            Dropout(p=self.dropout),
+        # pre-attention
+        self.instance_transf = Linear_norm(
+            in_features=self.feature_dim,
+            out_features=self.feature_depth,
+            dropout=0.1,
+            constant_size=args.constant_size,
         )
-
+        # attention
         self.pooling_function = PoolingFunction(self.args)
-
-        # make a function
+        # post-attention
         classifier = []
-        classifier.append(
-            Linear_norm(
-                int(self.feature_depth * self.num_heads),
-                self.width_fe,
-                self.dropout,
-                args.constant_size,
-            )
-        )
-        for i in range(self.n_layers_classif):
+        if self.n_layers_classif > 0:
             classifier.append(
                 Linear_norm(
-                    self.width_fe, self.width_fe, self.dropout, args.constant_size
+                    int(self.feature_depth * self.num_heads),
+                    self.width_fe,
+                    0.1,
+                    args.constant_size,
                 )
             )
-        classifier.append(Linear(self.width_fe, self.num_class))
-        classifier.append(LogSoftmax(-1))
+            for i in range(self.n_layers_classif - 1):
+                classifier.append(
+                    Linear_norm(self.width_fe, self.width_fe, 0.1, args.constant_size)
+                )
+            classifier.append(Linear(self.width_fe, self.num_class))
+        else:
+            classifier.append(
+                Linear(int(self.feature_depth * self.num_heads), self.num_class)
+            )
+        if self.output_layer == "logsoftmax":
+            classifier.append(LogSoftmax(-1))
+        elif self.output_layer == "softmax":
+            classifier.append(Softmax(-1))
         self.classifier = Sequential(*classifier)
 
     def forward(self, x):
@@ -413,29 +424,52 @@ class MILFactory(Module):
         self.name, self.mil = self.get_model(args)
 
     def forward(self, x):
-        if self.args.wsi_enc == "tile":
-            if self.args.constant_size:
-                batch_size, nb_tiles = x.shape[0], x.shape[1]
-            else:
-                batch_size, nb_tiles = 1, x.shape[-2]
-            x = x.view(batch_size, nb_tiles, self.args.feature_dim)
-        elif self.args.wsi_enc == "slide":
-            batch_size = x.shape[0]
-            x = x.view(batch_size, self.args.feature_dim)
+        if self.args.constant_size:
+            batch_size, nb_tiles = x.shape[0], x.shape[1]
+        else:
+            batch_size, nb_tiles = 1, x.shape[-2]
+        x = x.view(batch_size, nb_tiles, self.args.feature_dim)
         x = self.mil(x)
         return x
 
     def get_model(self, args):
         model_name = args.model
-        # tmp fix to use model train with old model_name
-        if model_name == "mhmc" or model_name == "mhmclayers":
+        if model_name == "mhmc":
             mil = MHMClayers
         # Possibility to had model
-        elif model_name == "mlp":
-            mil = MLP
         else:
             raise ValueError(f"Unknown encoder name {model_name}")
         return model_name, mil(args)
 
     def print_summary(self, depth=4, verbose=1):
         summary(self.mil, depth=depth, verbose=verbose)
+
+
+class FocalLoss(Module):
+    """Binary focal loss.
+    Args:
+        alpha (float): weight for positive class (for imbalance), default=1.0
+        gamma (float): focusing parameter, default=2.0
+        reduction (str): 'mean', 'sum', or 'none'
+    """
+
+    def __init__(self, alpha=1.0, gamma=2.0, reduction="mean"):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        # expects raw logits as inputs (like BCEWithLogitsLoss)
+        bce_loss = F.binary_cross_entropy_with_logits(
+            inputs, targets.float(), reduction="none"
+        )
+        # pt = exp(-bce_loss) = predicted probability assigned to the true class
+        pt = torch.exp(-bce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
+
+        if self.reduction == "mean":
+            return focal_loss.mean()
+        elif self.reduction == "sum":
+            return focal_loss.sum()
+        return focal_loss

@@ -3,7 +3,7 @@ implementing models. DeepMIL implements a models that classify a whole slide ima
 """
 
 from torch.nn import BCELoss, NLLLoss
-from torch.optim import Adam
+from torch.optim import AdamW, SGD
 import torch
 from torch.nn.utils import clip_grad_norm_
 import numpy as np
@@ -12,45 +12,14 @@ from abc import ABC, abstractmethod
 from torch.utils.tensorboard import SummaryWriter
 import shutil
 import os
-from .networks import MILFactory
+from .networks import MILFactory, FocalLoss
 from .dataloader import Dataset_handler
-from torch.nn import Module
-import torch.nn.functional as F
-
-
-class FocalLoss(Module):
-    """Binary focal loss.
-    Args:
-        alpha (float): weight for positive class (for imbalance), default=1.0
-        gamma (float): focusing parameter, default=2.0
-        reduction (str): 'mean', 'sum', or 'none'
-    """
-
-    def __init__(self, alpha=1.0, gamma=2.0, reduction="mean"):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, inputs, targets):
-        # expects raw logits as inputs (like BCEWithLogitsLoss)
-        bce_loss = F.binary_cross_entropy_with_logits(
-            inputs, targets.float(), reduction="none"
-        )
-        # pt = exp(-bce_loss) = predicted probability assigned to the true class
-        pt = torch.exp(-bce_loss)
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
-
-        if self.reduction == "mean":
-            return focal_loss.mean()
-        elif self.reduction == "sum":
-            return focal_loss.sum()
-        return focal_loss
 
 
 class Model(ABC):
     def __init__(self, args):
         self.args = args
+        self.task = None
         self.optimizers = []
         self.losses = {"global": []}
         self.metric = 0
@@ -77,11 +46,6 @@ class Model(ABC):
     def predict(self, x):
         """Makes a prediction about the label of x.
         Prediction should be in numpy format.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            input
         """
         pass
 
@@ -119,9 +83,11 @@ class Model(ABC):
 
 
 class EarlyStopping:
-    """Early stopping AND saver !"""
+    """Early stopping AND saver"""
 
     def __init__(self, args):
+        self.min_epoch = 50
+        self.epoch = 0
         self.patience = args.patience
         self.counter = 0
         self.loss_min = None
@@ -130,13 +96,14 @@ class EarlyStopping:
         self.filename = "model.pt.tar"
 
     def __call__(self, loss, state):
+        self.epoch += 1
         if self.loss_min is None:
             self.loss_min = loss
             self.is_best = True
         elif self.loss_min <= loss:
             self.counter += 1
             self.is_best = False
-            if not self.counter < self.patience:
+            if not self.counter < self.patience and self.epoch >= self.min_epoch:
                 self.early_stop = True
         else:
             self.is_best = True
@@ -154,17 +121,15 @@ class EarlyStopping:
 
 class DeepMIL(Model):
     """
-    Class implementing a Deep-MIL framwork, for WSI classification.
+    Class implementing a Deep-MIL framework.
     """
 
-    def __init__(self, args, label_encoder=None, with_data=False, ipca=None):
+    def __init__(self, args, label_encoder=None, with_data=False):
         """
-        args contains all the info for initializing the deepmil and its dataloader.
-
-        :param args: Namespace. outputs of .arguments.get_arguments.
+        :param args: Namespace. outputs of .arguments.get_arguments. contains all the info for initializing the deepmil and its dataloader.
         :param label_encoder: sklearn.LabelEncoder, default = None.
         :param with_data: bool, when True : set the data_loaders according to args. When False,
-        The MIL model is loader without the data.
+
         Order of calls for _constructors fucntions is important.
         """
         super(DeepMIL, self).__init__(args)
@@ -174,6 +139,7 @@ class DeepMIL(Model):
         self.mean_val_loss = 0
         self.model_name = args.model
         self.network = self._get_network()
+        self.output_layer = self.network.mil.output_layer
         optimizer = self._get_optimizer(args)
         self.optimizers = [optimizer]
         self.schedulers = self._get_schedulers(args)
@@ -183,19 +149,17 @@ class DeepMIL(Model):
             if label_encoder is None
             else label_encoder
         )
-        # when training ipca = None, when predicting, ipca is given when loading.
-        self.ipca = ipca
         self.criterion = self._get_criterion(args.criterion)
         self.bayes = False
 
     def _get_network(self):
         """_get_network.
+
         Initialize the network and transfer it on the cuda device.
 
         :return nn.Module: MIL network.
         """
         net = MILFactory(self.args)
-        # add logsoftmax here if criterion is nll
         net = net.to(self.args.device)
         return net
 
@@ -207,7 +171,7 @@ class DeepMIL(Model):
         :param args: Namespace. Outputs of .arguments.get_arguments.
         :param with_data: bool, if TRUE, loads data, else not.
         """
-        train_loader, val_loader, label_encoder = None, None, None
+        train_loader, val_loader = None, None
         if with_data:
             data = Dataset_handler(args)
             train_loader, val_loader = data.get_loader(training=True)
@@ -243,9 +207,9 @@ class DeepMIL(Model):
         :param args: Namespace. Outputs of .arguments.get_arguments.
         """
         if args.optimizer == "adam":
-            optimizer = Adam(self.network.parameters(), lr=args.lr, weight_decay=1e-5)
+            optimizer = AdamW(self.network.parameters(), lr=args.lr, weight_decay=1e-5)
         if args.optimizer == "sgd":
-            optimizer = torch.optim.SGD(
+            optimizer = SGD(
                 self.network.parameters(), args.lr, momentum=0.9, weight_decay=1e-5
             )
         return optimizer
@@ -261,7 +225,7 @@ class DeepMIL(Model):
         if criterion == "nll":  # to use with log-probabilities.
             criterion = NLLLoss().to(self.args.device)
         if criterion == "focal":  # to use with logits.
-            criterion = None
+            criterion = FocalLoss().to(self.args.device)
         return criterion
 
     def _forward_no_grad(self, x):
@@ -283,7 +247,7 @@ class DeepMIL(Model):
         :param out: torch.tensor or ndarray, output of the MIL network
         :return type(out), pseudo proba.
         """
-        if self.model_name in ["mhmc", "mlp"]:
+        if self.output_layer == "logsoftmax":
             return np.exp(out)
         else:
             return out
@@ -326,7 +290,9 @@ class DeepMIL(Model):
         """
         val_scores = np.array(self.results_val["scores"])
         val_y = np.array(self.results_val["y_true"])
+
         val_metrics = self._compute_metrics(scores=val_scores, y_true=val_y)
+
         val_metrics["mean_train_loss"] = self.mean_train_loss
         val_metrics["mean_val_loss"] = self.mean_val_loss
         self._keep_best_metrics(val_metrics)
@@ -374,8 +340,6 @@ class DeepMIL(Model):
             metrics_dict["roc_auc"] = metrics.roc_auc_score(
                 y_true=y_true, y_score=scores[:, 1]
             )
-        metrics_dict["epoch"] = self.counter["epoch"]
-        metrics_dict["lr"] = [scheduler._last_lr[0] for scheduler in self.schedulers][0]
         return metrics_dict
 
     def predict(self, x):
@@ -452,7 +416,7 @@ class DeepMIL(Model):
             target_batch = target_batch.to(self.args.device, dtype=torch.int64)
             output = self.forward(input_batch)
             loss = self.criterion(output, target_batch)
-
+        # Could do better
         else:  # We have to process a batch as a list of tensors (of different sizes)
             loss = 0
             for o, im in enumerate(input_batch):
@@ -486,6 +450,5 @@ class DeepMIL(Model):
             "target_table": self.train_loader.dataset.target_table,
             "best_metrics": self.best_metrics,
             "label_encoder": self.train_loader.dataset.label_encoder,
-            "ipca": self.ipca,
         }
         return dictio

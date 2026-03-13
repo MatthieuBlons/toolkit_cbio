@@ -39,6 +39,8 @@ def encoder_factory(model_name, pretrained=True, freeze=True, **kwargs):
         return enc(model_name=model_name)
     elif model_name == "titan":
         enc = TitanSlideEncoder
+    elif model_name == "threads":
+        enc = ThreadsSlideEncoder
     elif model_name == "prism":
         enc = PRISMSlideEncoder
     elif model_name == "chief":
@@ -70,7 +72,10 @@ class BaseSlideEncoder(torch.nn.Module):
             self.model.eval()
 
     def print_summary(self, depth=4, verbose=1):
-        model_summary(self.model, depth=depth, verbose=verbose)
+        if self.model is not None:
+            model_summary(self.model, depth=depth, verbose=verbose)
+        else:
+            print("Slide encoder has no summary (must be mean-pooling)")
 
     def forward(self, batch):
         """
@@ -291,6 +296,33 @@ class MadeleineSlideEncoder(BaseSlideEncoder):
         return z
 
 
+class ThreadsSlideEncoder(BaseSlideEncoder):
+
+    def __init__(self, **build_kwargs):
+        """
+        Threads initialization.
+        """
+        super().__init__(**build_kwargs)
+
+    def _build(self, pretrained=True):
+
+        self.enc_name = "threads"
+
+        try:
+            from threadsmodel.inference import (
+                create_model,
+                create_model_from_pretrained,
+            )
+        except:
+            traceback.print_exc()
+            raise Exception("Coming Soon! Thanks for your patience.")
+
+        return None, None, None
+
+    def forward(self, batch, device="cuda", return_raw_attention=False):
+        pass
+
+
 class TitanSlideEncoder(BaseSlideEncoder):
 
     def _build(self, pretrained=True):
@@ -332,6 +364,8 @@ class MeanSlideEncoder(BaseSlideEncoder):
             embedding_dim = 768
         elif model_name == "mean-phikon":
             embedding_dim = 768
+        elif model_name == "mean-phikon_v2":
+            embedding_dim = 1024
         elif model_name == "mean-resnet50":
             embedding_dim = 1024
         elif model_name == "mean-gigapath":
@@ -342,24 +376,10 @@ class MeanSlideEncoder(BaseSlideEncoder):
             embedding_dim = 2560
         elif model_name == "mean-hoptimus0":
             embedding_dim = 1536
-        elif model_name == "mean-phikon_v2":
-            embedding_dim = 1024
+        elif model_name == "mean-hoptimus1":
+            embedding_dim = 1536
         elif model_name == "mean-musk":
             embedding_dim = 1024
-        elif model_name == "mean-hibou_l":
-            embedding_dim = 1024
-        elif model_name == "mean-kaiko-vit8s":
-            embedding_dim = 384
-        elif model_name == "mean-kaiko-vit16s":
-            embedding_dim = 384
-        elif model_name == "mean-kaiko-vit8b":
-            embedding_dim = 768
-        elif model_name == "mean-kaiko-vit16b":
-            embedding_dim = 768
-        elif model_name == "mean-kaiko-vit14l":
-            embedding_dim = 1024
-        elif model_name == "lunit-vits8":
-            embedding_dim = 384
         else:
             print(
                 f"WARNING: Could not automatically infer embedding_dim for mean encoder {self.enc_name}. Setting to None."
@@ -386,6 +406,8 @@ def fetch_embeddings_dim(tile_encoder):
         embedding_dim = 768
     elif tile_encoder == "phikon":
         embedding_dim = 768
+    elif tile_encoder == "phikon_v2":
+        embedding_dim = 1024
     elif tile_encoder == "resnet50":
         embedding_dim = 1024
     elif tile_encoder == "gigapath":
@@ -396,24 +418,10 @@ def fetch_embeddings_dim(tile_encoder):
         embedding_dim = 2560
     elif tile_encoder == "hoptimus0":
         embedding_dim = 1536
-    elif tile_encoder == "phikon_v2":
-        embedding_dim = 1024
+    elif tile_encoder == "hoptimus1":
+        embedding_dim = 1536
     elif tile_encoder == "musk":
         embedding_dim = 1024
-    elif tile_encoder == "hibou_l":
-        embedding_dim = 1024
-    elif tile_encoder == "kaiko-vit8s":
-        embedding_dim = 384
-    elif tile_encoder == "kaiko-vit16s":
-        embedding_dim = 384
-    elif tile_encoder == "kaiko-vit8b":
-        embedding_dim = 768
-    elif tile_encoder == "kaiko-vit16b":
-        embedding_dim = 768
-    elif tile_encoder == "kaiko-vit14l":
-        embedding_dim = 1024
-    elif tile_encoder == "lunit-vits8":
-        embedding_dim = 384
     else:
         print(
             f"WARNING: Tile embedding dimension is not known a priori for {tile_encoder}. Setting to None."

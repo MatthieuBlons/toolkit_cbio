@@ -1,3 +1,6 @@
+from torch.nn import Softmax
+
+
 class HookerAttnMIL:
     """
     Manage the hooks for the MIL algorithm.
@@ -14,6 +17,7 @@ class HookerAttnMIL:
         self.head_average = None
         self.reprewsi = None
         self.scores = None
+        self.proba = None
 
     def _get_instance_transf(self):
         def hook_instance_transf(m, i, o):
@@ -28,7 +32,7 @@ class HookerAttnMIL:
     def _get_attention_hook(self):
         def hook_attention(m, i, o):
             """
-            hooks the output of the attention heads
+            hooks the output of the attention heads before softmax
             """
             tiles_weights = i[0]
             tiles_weights = tiles_weights.view(-1, self.num_heads)
@@ -43,6 +47,7 @@ class HookerAttnMIL:
             """
             repre = i[0]
             self.scores = repre.detach().cpu().numpy()
+            self.proba = Softmax(dim=-1)(repre).detach().cpu().numpy()
 
         return hook_output
 
@@ -72,7 +77,7 @@ class HookerAttnMIL:
                 self.place_hooks(layer)
 
             if name == "instance_transf":
-                hook_layer = list(layer.children())[0]  # last layer is softmax
+                hook_layer = list(layer.children())[0]
                 hook_layer.register_forward_hook(self._get_instance_transf())
 
             if name == "attention":
@@ -88,5 +93,5 @@ class HookerAttnMIL:
                     self._get_wsi_representation_hook()
                 )
 
-                layer_scores = list(layer.children())[-1]
+                layer_scores = list(layer.children())[-1]  # LogSoftmax
                 layer_scores.register_forward_hook(self._get_outputs_hook())

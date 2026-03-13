@@ -60,7 +60,6 @@ class WSIEncoded(Dataset):
         (
             self.files,
             self.target_dict,
-            self.sampler_dict,
             self.stratif_dict,
             self.label_encoder,
         ) = self._make_db()
@@ -80,12 +79,14 @@ class WSIEncoded(Dataset):
         """
         table, label_encoder = self.transform_target()
         target_dict = dict()  # Key = path to the file, value=target
-        sampler_dict = dict()
         stratif_dict = dict()
         names = table["ID"].values
         files_filtered = []
         for name in names:
-            filepath = os.path.join(self.embeddings_dir, name + ".h5")
+            # do not check extension here?
+            filepath = os.path.join(
+                self.embeddings_dir, name + f".{self.args.wsi_format}"
+            )
             if os.path.exists(filepath):
                 if self._is_in_db(name):
                     files_filtered.append(filepath)
@@ -95,11 +96,8 @@ class WSIEncoded(Dataset):
                     stratif_dict[filepath] = table[table["ID"] == name][
                         "stratif"
                     ].values[0]
-                    sampler_dict[filepath] = EncodingSampler(
-                        feat_path=filepath,
-                        feat_key=self.args.wsi_enc,
-                    )
-        return files_filtered, target_dict, sampler_dict, stratif_dict, label_encoder
+
+        return files_filtered, target_dict, stratif_dict, label_encoder
 
     def transform_target(self):
         """Adds to table a numerical encoding of the target.
@@ -114,19 +112,10 @@ class WSIEncoded(Dataset):
         return tmp, label_encoder
 
     def get_embeddings(self, path):
-        # chaneg attribute in tile patcher: "features" -> "tile_features"
-        if self.args.wsi_enc == "slide":
-            feat_key = f"{self.args.wsi_enc}_features"
-            with h5py.File(path, "r") as f:
-                attrs = dict(f[feat_key].attrs)
-                feats = f[feat_key][:]
-            return attrs, feats
-        else:
-            feat_key = "features"
-            with h5py.File(path, "r") as f:
-                attrs = dict(f[feat_key].attrs)
-                feats = f[feat_key][:]
-            return attrs, feats
+        with h5py.File(path, "r") as f:
+            attrs = dict(f["features"].attrs)
+            feats = f["features"][:]
+        return attrs, feats
 
     def _is_in_db(self, name):
         """Do we keep the file in the dataset ?"""
@@ -167,17 +156,20 @@ class WSIEncoded(Dataset):
         :param mat: ndarray: matrix of the embedded wsi.
         return ndarray: matrix of the subsampled WSI.
         """
-        if self.use_train and self.args.n_tiles != 0:
-            sampler = self.sampler_dict[path]
-            indices = getattr(sampler, self.args.sampler + "_sampler")(
-                n_samples=self.args.n_tiles
+        if self.use_train:
+            train_sampler = EncodingSampler(
+                sampler_name=self.args.sampler,
+                feat_path=path,
+                n_samples=self.args.n_tiles,
             )
+            indices = train_sampler.sampler()
             mat = mat[indices, :]
         else:
-            sampler = self.sampler_dict[path]
-            indices = getattr(sampler, self.args.val_sampler + "_sampler")(
-                n_samples=self.args.n_tiles
+            test_sampler = EncodingSampler(
+                sampler_name=self.args.val_sampler,
+                feat_path=path,
             )
+            indices = test_sampler.sampler()
             mat = mat[indices, :]
         return mat
 
@@ -191,7 +183,7 @@ class Dataset_handler:
 
     """
 
-    def __init__(self, args, predict=False, format="h5"):
+    def __init__(self, args, predict=False):
         """
         Generates a validation dataset and a training dataset.
         If predict=True, the training dataset contains all the dataset.
@@ -200,7 +192,6 @@ class Dataset_handler:
         self.use_val = args.use_val
         self.num_class = args.num_class
         self.predict = predict
-        self.format = format
         self.num_workers = args.num_workers
         self.dataset_train = self._get_dataset(use_train=True)
         self.dataset_test = self._get_dataset(use_train=False)
@@ -246,10 +237,11 @@ class Dataset_handler:
         testing fold, else of the training folds.
         :return EmbeddedWSI
         """
-        if self.format == "h5":
-            dataset = WSIEncoded(self.args, use_train=use_train, predict=self.predict)
-        else:
-            raise ValueError("Invalid wsi embedded format")
+        dataset = WSIEncoded(
+            self.args,
+            use_train=use_train,
+            predict=self.predict,
+        )
         return dataset
 
     def _get_sampler(self, dataset, use_val=True):
@@ -266,8 +258,10 @@ class Dataset_handler:
         """
         replacement = True
         if use_val:
+            # to change
+            # to change use labels_strat when there is no stratif (regression, cox...)
+            # only use it with WeightedRandomSamplerFromList
             labels_strat = [dataset.stratif_dict[x] for x in dataset.files]
-            # validation is done on 1/5th of the training dataset
             splitter = StratifiedShuffleSplit(
                 n_splits=1, test_size=0.2, random_state=np.random.randint(100)
             )
@@ -275,8 +269,6 @@ class Dataset_handler:
                 x for x in splitter.split(X=labels_strat, y=labels_strat)
             ][0]
             labels_train_strat = np.array(labels_strat)[np.array(train_indices)]
-
-            val_sampler = SubsetRandomSampler(indices=val_indices)
             if self.args.no_strat_sampling:
                 replacement = False
             train_sampler = WeightedRandomSamplerFromList(
@@ -289,9 +281,10 @@ class Dataset_handler:
                 num_samples=len(train_indices),
                 replacement=replacement,
             )
+            val_sampler = SubsetRandomSampler(indices=val_indices)
         else:
             train_sampler = SubsetRandomSampler(list(range(len(dataset))))
-            val_sampler = SubsetRandomSampler(list(range(len(dataset))))
+            val_sampler = SubsetRandomSampler(list(range(len(dataset))))  # will be test
         return train_sampler, val_sampler
 
     def _get_weights_sampling(

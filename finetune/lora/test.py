@@ -34,7 +34,7 @@ def test(model, dataloader):
     pred = np.vstack(model.results_val["pred"])
 
     img_paths = [os.path.basename(x) for x in dataloader.dataset.input_files]
-    features = dataloader.dataset.labels
+    features = dataloader.dataset.target_lables
     outputs_dict = {
         "gt": gts,
         "pred": pred,
@@ -56,7 +56,9 @@ def main(model_path: str | None = None, input_path: str | None = None, verbose=0
     if input_path is not None:
         args.input_path = input_path
     print_dict(args.__dict__, name="model args")
-    data = Dataset_handler(args, img_only=False, preprocess=model.network.transform, predict=False)
+    data = Dataset_handler(
+        args, img_only=False, preprocess=model.network.transform, predict=False
+    )
     dataloader = data.get_loader(training=False)
     results = test(model, dataloader)
-    return results
+    return results, args

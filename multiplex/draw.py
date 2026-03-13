@@ -37,7 +37,7 @@ def dynamic_display_range(image, smoothing_sigma=1.0, min_density_ratio=0.001):
     return lower_bound, upper_bound
 
 
-def blend_colors(img, colors, scale_by="clip", density_ratio=0.0001, gamma=1):
+def blend_colors(img, colors, scale_by="clip", density_ratio=0.0001, gamma=1, eps=1e-8):
     if len(colors.shape) > 1:
         n_channel_color = colors.shape[1]
     else:
@@ -61,7 +61,7 @@ def blend_colors(img, colors, scale_by="clip", density_ratio=0.0001, gamma=1):
                 channel, min_density_ratio=density_ratio
             )
             clipped = np.clip(channel, a_min=lower_bound, a_max=upper_bound)
-            relative_img = (clipped - clipped.min()) / (clipped.max() - clipped.min())
+            relative_img = (clipped - clipped.min()) / (clipped.max() - clipped.min() + eps)
 
         # blending is how to weight the mix of colors, similar to an alpha channel
         for j in range(n_channel_color):

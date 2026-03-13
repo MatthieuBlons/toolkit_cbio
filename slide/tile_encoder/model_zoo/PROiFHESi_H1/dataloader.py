@@ -246,7 +246,7 @@ class HEImage(Dataset):
             img = self.color_augmentations(image=img)["image"]
             img = np.clip(img, 0, 255)
         return img
-    # work on numpy
+
     def get_augmentations(
         self,
         training=True,

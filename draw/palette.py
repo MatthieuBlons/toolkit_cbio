@@ -4,7 +4,7 @@ from PIL import Image
 from operator import itemgetter
 
 
-def mosaic(imlist, size=None, max_img=None, ax=None):
+def mosaic(imlist, size=None, max_img=None, ax=None, title=None):
     if not imlist:
         raise Exception("List of images is empty")
     if not size:
@@ -13,10 +13,13 @@ def mosaic(imlist, size=None, max_img=None, ax=None):
             for name in imlist:
                 with Image.open(name) as img:
                     imsizes.append(img.size)
-            max_width, max_height = (
-                max(imsizes, key=itemgetter(0))[0],
-                max(imsizes, key=itemgetter(1))[1],
-            )
+        elif isinstance(imlist[0], np.ndarray):
+            for array in imlist:
+                imsizes.append(array.shape)
+        max_width, max_height = (
+            max(imsizes, key=itemgetter(0))[0],
+            max(imsizes, key=itemgetter(1))[1],
+        )
         size = (max_width, max_height)
     if not max_img:
         max_img = len(imlist)
@@ -64,6 +67,8 @@ def mosaic(imlist, size=None, max_img=None, ax=None):
                         "imlist should be a list of str or list of ndarrays"
                     )
     # show image
+    if title:
+        ax.set_title(title)
     ax.imshow(grid)
 
 
