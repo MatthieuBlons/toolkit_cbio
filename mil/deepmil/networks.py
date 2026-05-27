@@ -14,7 +14,9 @@ from torch.nn import (
     Conv2d,
     ReLU,
     GELU,
+    SiLU,
     Dropout,
+    LayerNorm,
     BatchNorm1d,
     BatchNorm2d,
     InstanceNorm1d,
@@ -26,6 +28,7 @@ from torch.nn.init import xavier_uniform_, constant_
 import torch.nn.functional as F
 from mil.deepmil.utils import is_in_args
 from torchinfo import summary
+import math
 
 
 def get_norm_layer(use_bn=True, d=1):
@@ -285,7 +288,7 @@ class MLP(Module):
             in_features=self.feature_dim,
             out_features=self.feature_depth,
             dropout=0.1,
-            constant_size=args.constant_size,
+            constant_size=self.args.constant_size,
         )
         return transform
 
@@ -303,7 +306,10 @@ class MLP(Module):
             for i in range(self.n_layers_classif - 1):
                 classifier.append(
                     Linear_norm(
-                        self.width_fe, self.width_fe, self.dropout, args.constant_size
+                        self.width_fe,
+                        self.width_fe,
+                        self.dropout,
+                        self.args.constant_size,
                     )
                 )
             classifier.append(Linear(self.width_fe, self.num_class))
@@ -339,7 +345,6 @@ class MHMClayers(Module):
     """
     MultiHeadMultiClass attention MIL,
     with Linear layers in pre- and post-attention modules.
-
     """
 
     def __init__(self, args):
@@ -358,15 +363,53 @@ class MHMClayers(Module):
         assert (
             self.dim_heads * self.num_heads == self.atn_dim
         ), "atn_dim must be divisible by num_heads"
+
         # pre-attention
-        self.instance_transf = Linear_norm(
-            in_features=self.feature_dim,
-            out_features=self.feature_depth,
-            dropout=0.1,
-            constant_size=args.constant_size,
-        )
+        self.instance_transf = None
+        # one layer linear projection
+        if self.args.instance_transf == "linear":
+            self.instance_transf = Linear_norm(
+                in_features=self.feature_dim,
+                out_features=self.feature_depth,
+                dropout=0.1,
+                constant_size=args.constant_size,
+            )
+        # one layer linear projection + one transfomer block
+        if self.args.instance_transf == "transformer":
+            assert (
+                self.feature_dim == self.feature_depth
+            ), "when using transformer layer make sure feature_depth == feature_dim"
+            self.instance_transf = TransLayer(
+                hidden_dim=self.feature_depth, num_heads=1, mlp_dim=512, drop=0.1
+            )
+        # one layer linear projection + one transfomer block + Rope
+        if self.args.instance_transf == "roformer":
+            assert (
+                self.feature_dim == self.feature_depth
+            ), "when using transformer layer make sure feature_depth == feature_dim"
+            self.instance_transf = TransLayer(
+                hidden_dim=self.feature_depth,
+                num_heads=1,
+                mlp_dim=512,
+                drop=0.1,
+                rope=True,
+            )
+        # one layer linear projection + one transfomer block + Relative Position bias
+        if self.args.instance_transf == "rposbias":
+            assert (
+                self.feature_dim == self.feature_depth
+            ), "when using transformer layer make sure feature_depth == feature_dim"
+            self.instance_transf = TransLayer(
+                hidden_dim=self.feature_depth,
+                num_heads=1,
+                mlp_dim=512,
+                drop=0.1,
+                rpb=True,
+            )
+
         # attention
         self.pooling_function = PoolingFunction(self.args)
+
         # post-attention
         classifier = []
         if self.n_layers_classif > 0:
@@ -387,6 +430,8 @@ class MHMClayers(Module):
             classifier.append(
                 Linear(int(self.feature_depth * self.num_heads), self.num_class)
             )
+
+        # output
         if self.output_layer == "logsoftmax":
             classifier.append(LogSoftmax(-1))
         elif self.output_layer == "softmax":
@@ -399,13 +444,27 @@ class MHMClayers(Module):
             * F is the dimension of feature space
             * N is number of patche
         """
+
         bs, _, _ = x.shape
-        if self.args.instance_transf:
-            x = self.instance_transf(x)
+        # Patch transformation
+        if self.instance_transf is not None:
+            if (self.args.instance_transf == "roformer"
+                or self.args.instance_transf == "rposbias"
+            ):
+                x, coords = x
+                x = self.instance_transf(x, coords)
+            else:
+                x = self.instance_transf(x)
+
+        # Attention
         slide = self.pooling_function(x)
         if not self.args.constant_size:
             slide = slide.unsqueeze(-2)
+
+        # Classifier
         out = self.classifier(slide)
+
+        # Output layer
         out = out.view((bs, self.num_class))
         return out
 
@@ -445,31 +504,296 @@ class MILFactory(Module):
         summary(self.mil, depth=depth, verbose=verbose)
 
 
-class FocalLoss(Module):
-    """Binary focal loss.
-    Args:
-        alpha (float): weight for positive class (for imbalance), default=1.0
-        gamma (float): focusing parameter, default=2.0
-        reduction (str): 'mean', 'sum', or 'none'
-    """
-
-    def __init__(self, alpha=1.0, gamma=2.0, reduction="mean"):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, inputs, targets):
-        # expects raw logits as inputs (like BCEWithLogitsLoss)
-        bce_loss = F.binary_cross_entropy_with_logits(
-            inputs, targets.float(), reduction="none"
+# transformers related:
+class SinCosEncoding(Module):
+    def __init__(
+        self,
+        feature_dim,
+        dim=2,
+        freq=10000,
+    ):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.dim = dim
+        assert self.feature_dim % self.dim == 0, print(
+            f"SinCosEncoding requires // {self.dim}"
         )
-        # pt = exp(-bce_loss) = predicted probability assigned to the true class
-        pt = torch.exp(-bce_loss)
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
+        self.freq = freq
 
-        if self.reduction == "mean":
-            return focal_loss.mean()
-        elif self.reduction == "sum":
-            return focal_loss.sum()
-        return focal_loss
+    def sincos(self, pos, feature_dim, freq):
+        """
+        pos: (B, N)
+        returns: (B, N, dim)
+        """
+        device = pos.device
+        div_term = torch.exp(
+            torch.arange(0, feature_dim, 2, device=device)
+            * (-math.log(freq) / feature_dim)
+        )  # (dim/2,)
+        pos = pos.unsqueeze(-1)  # (B, N, 2)
+        pe = torch.zeros(*pos.shape[:-1], feature_dim, device=device)  # (B, N, dim)
+        pe[..., 0::2] = torch.sin(pos * div_term)
+        pe[..., 1::2] = torch.cos(pos * div_term)
+        return pe
+
+    def forward(self, x, pos):
+        """
+        x: (B, N, D)
+        pos: (B, N, dim)  (pixel positions)
+        """
+        if self.dim == 2:
+            x_pos = pos[..., 0]  # (B, N)
+            y_pos = pos[..., 1]  # (B, N)
+            pe_x = self.sincos(x_pos, self.feature_dim // 2, self.freq)
+            pe_y = self.sincos(y_pos, self.feature_dim // 2, self.freq)
+            pe = torch.cat([pe_x, pe_y], dim=-1)  # (B, N, D)
+            return x + pe
+        else:
+            pe = self.sincos(pos, self.feature_dim, self.freq)  # (B, N, D)
+            return x + pe
+
+
+class LearnedPosEncoding(Module):
+    def __init__(
+        self,
+        feature_dim,
+        hidden_dim=128,
+    ):
+        """
+        dim: embedding dimension
+        hidden_dim: size of hidden layer in MLP
+        """
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.mlp = Sequential(
+            Linear(2, hidden_dim), GELU(), Linear(hidden_dim, feature_dim)
+        )
+
+    def forward(self, x, pos):
+        """
+        x: (B, N, D)
+        pos: (B, N, 2)  (pixel coordinates)
+        """
+        pe = self.mlp(pos)  # (B, N, D)
+        return x + pe
+
+
+class PosEncoding(Module):
+    pos_encoding_mapping = {
+        "sincos": SinCosEncoding,
+        "learned": LearnedPosEncoding,
+        # "relative": RelativePosEncoding,
+    }
+
+    def __init__(self, feature_dim, strategy=None, *args, **kwargs):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.strategy = strategy
+
+        if self.strategy is not None:
+            assert feature_dim % 2 == 0, "PosEncoding requires even dimension"
+            self.position = self._get_encoding_strategy(self.strategy, *args, **kwargs)
+
+    def _get_encoding_strategy(self, enc_strategy: str, *args, **kwargs) -> callable:
+        if enc_strategy.lower() in PosEncoding.pos_encoding_mapping.keys():
+            return PosEncoding.pos_encoding_mapping[enc_strategy.lower()](
+                *args,
+                **kwargs,
+            )
+        # Otherwise raise an error
+        else:
+            raise NotImplementedError(
+                "pos encoding strategy: {} is not implemented.".format(enc_strategy)
+                + f"\nPlease choose a valid strategy from: {' ,'.join(PosEncoding.pos_encoding_mapping.keys())}."
+            )
+
+    def forward(self, x, coords=None):
+        if self.strategy is None:
+            return x
+
+        if coords is None:
+            raise ValueError("Coords are required for positional encoding")
+
+        return self.position(x, coords)
+
+
+class RoPE(Module):
+    def __init__(self, feature_dim, freq=10000):
+        """ """
+        super().__init__()
+        assert feature_dim % 2 == 0, "RoPE requires even dimension"
+
+        self.feature_dim = feature_dim
+        self.freq = freq
+
+        inv_freq = 1.0 / (
+            freq ** (torch.arange(0, feature_dim, 2).float() / feature_dim)
+        )
+        self.register_buffer("inv_freq", inv_freq)
+
+    def _get_angles(self, coords):
+        """ """
+        # simple 2D → 1D projection (sum works well in practice)
+        pos = coords[..., 0] + coords[..., 1]  # (B, N)
+
+        freqs = torch.einsum("bn,d->bnd", pos, self.inv_freq)
+        return freqs
+
+    def _rotate_half(self, x):
+        x1 = x[..., 0::2]
+        x2 = x[..., 1::2]
+        return torch.stack((-x2, x1), dim=-1).flatten(-2)
+
+    def forward(self, q, k, coords):
+        """ """
+        freqs = self._get_angles(coords)
+
+        cos = torch.cos(freqs).unsqueeze(1)
+        sin = torch.sin(freqs).unsqueeze(1)
+
+        # expand to full dim
+        cos = torch.repeat_interleave(cos, 2, dim=-1)
+
+        q_rot = (q * cos) + (self._rotate_half(q) * sin)
+        k_rot = (k * cos) + (self._rotate_half(k) * sin)
+
+        return q_rot, k_rot
+
+
+class RelativePositionBias(Module):
+    def __init__(self, num_heads, hidden_dim=128):
+        super().__init__()
+        self.num_heads = num_heads
+
+        self.mlp = Sequential(
+            Linear(2, hidden_dim), GELU(), Linear(hidden_dim, num_heads)
+        )
+
+    def forward(self, coords):
+        """
+        coords: (B, N, 2)
+
+        returns:
+            bias: (B, num_heads, N, N)
+        """
+        B, N, _ = coords.shape
+
+        # Compute pairwise relative positions
+        dist = coords[:, :, None, :] - coords[:, None, :, :]  # (B, N, N, 2)
+
+        # Flatten for MLP
+        dist_flat = dist.view(B * N * N, 2)
+
+        bias = self.mlp(dist_flat)  # (B*N*N, num_heads)
+
+        bias = bias.view(B, N, N, self.num_heads)
+        bias = bias.permute(0, 3, 1, 2)  # (B, H, N, N)
+
+        return bias
+
+
+class GatedMLP(Module):
+    def __init__(self, dim, hidden_dim, drop=0.0):
+        super().__init__()
+
+        # project to 2 * hidden_dim (for gating)
+        self.fc1 = Linear(dim, hidden_dim * 2)
+
+        self.act = SiLU()
+
+        self.fc2 = Linear(hidden_dim, dim)
+        self.drop = Dropout(drop)
+
+    def forward(self, x):
+        x_proj = self.fc1(x)  # (B, N, 2 * hidden_dim)
+
+        x, gate = x_proj.chunk(2, dim=-1)  # split
+
+        x = x * self.act(gate)  # gating
+
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+
+        return x
+
+
+class TransLayer(Module):
+    def __init__(
+        self,
+        hidden_dim,
+        num_heads=1,
+        mlp_dim=2048,
+        drop=0,
+        attn_drop=0,
+        rope=False,
+        rpb=False,
+        scale=True,
+        ls_init=1e-5,
+    ):
+        super().__init__()
+
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+
+        # Self-Attention
+        self.norm1 = LayerNorm(hidden_dim)
+        self.qkv = Linear(hidden_dim, hidden_dim * 3)
+        self.attn_drop = Dropout(attn_drop)
+        self.proj = Linear(hidden_dim, hidden_dim)
+        self.proj_drop = Dropout(drop)
+        self.ls1 = Parameter(ls_init * torch.ones(hidden_dim)) if scale else None
+
+        # Rope if needed
+        self.rope = RoPE(self.head_dim) if rope else None
+
+        # Or Relative Position Bias
+        self.rpb = RelativePositionBias(num_heads) if rpb else None
+
+        # Gated MLP
+        self.norm2 = LayerNorm(hidden_dim)
+        self.mlp = GatedMLP(hidden_dim, mlp_dim, drop)
+        self.ls2 = Parameter(ls_init * torch.ones(hidden_dim)) if scale else None
+
+    def forward(self, x, coords=None):
+        B, N, D = x.shape
+        # Attention
+        qkv = self.qkv(self.norm1(x)).reshape(B, N, 3, self.num_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)
+
+        q = q.transpose(1, 2)  # (B, H, N, D_head)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        if self.rope is not None:
+            q, k = self.rope(q, k, coords)
+
+        attn = (q @ k.transpose(-2, -1)) / (self.head_dim**0.5)
+
+        if self.rpb is not None:
+            bias = self.rpb(coords)  # (B, H, N, N)
+            attn = attn + bias
+
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        out = attn @ v
+        out = out.transpose(1, 2).reshape(B, N, D)
+
+        out = self.proj(out)
+        out = self.proj_drop(out)
+
+        if self.ls1 is not None:
+            x = x + self.ls1 * out
+        else:
+            x = x + out
+
+        # MLP
+        mlp_out = self.mlp(self.norm2(x))
+
+        if self.ls2 is not None:
+            x = x + self.ls2 * mlp_out
+        else:
+            x = x + mlp_out
+
+        return x
