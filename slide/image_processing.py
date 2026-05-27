@@ -4,11 +4,19 @@ import numpy as np
 import warnings
 import openslide
 
+# Torch for tensor op
+import torch
+import torch.nn.functional as F
+from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
+
 # Image processing modules
 from skimage.color import rgb2gray
 from skimage.feature._hog import _hog_channel_gradient, hog
 from skimage.filters import threshold_otsu
 from skimage.morphology import opening, closing, square
+from torchvision.transforms.functional import rgb_to_grayscale
+from torch_hog import hog as torch_hog
 
 # Project modules
 from slide.reader import OpenWSI
@@ -18,6 +26,30 @@ from slide.utils import get_x_y_to
 # Defining valid statistic function
 valid_stat_func = ["mean", "quantile", "min", "max", "channel_std"]
 valid_agg_func = ["sum", "mean", "max", "min", "quantile"]
+
+
+# down sample images? wth transform
+class TensorImg(Dataset):
+    def __init__(self, img_list):
+        self.img_list = img_list
+
+    def __len__(self):
+        return len(self.img_list)
+
+    def __getitem__(self, idx):
+        img = self.img_list[idx]
+        img = torch.from_numpy(img).float()
+        return img, idx  # H×WxC
+
+
+def safe_loader(img_list, batch_size=64, num_workers=0):
+    return DataLoader(
+        TensorImg(img_list),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
 
 
 def clear_border(
@@ -172,7 +204,7 @@ def mask_percentage(
 # contrast enhancer see tiatoolbox
 def compute_luminosity_mask(
     slide: OpenWSI | OpenOME | openslide.OpenSlide,
-    mask_level: int,
+    mask_level: int = 0,
     margin: int | tuple[int, int] = 0,
     intensity_thresh: tuple[float, float] = (0.1, 0.8),
     neighborhood_size: int = 2,
@@ -323,7 +355,9 @@ def get_patch_mask(
     # Returning mask for the patches
     return patch_mask
 
-# TODO: Make faster filtering function 
+
+# TODO: Make faster filtering function
+
 
 def compute_channel_gradient(image: np.ndarray, channel_axis: int = None):
     """
@@ -436,49 +470,6 @@ def compute_hog(
     return res
 
 
-def compute_channel_std(
-    img_list: list[np.ndarray] | np.ndarray, aggregate: str = "mean", q: float = 0.5
-):
-    """
-    Compute the standard deviation between the channel for each pixel in the image and for each image in the list.
-    Aggregate the results with the `aggregate` argument.
-
-    Args:
-        img_list:       list of np.ndarray or np.ndarray, list containing the images or array containing the flattened
-                        images (n_pixels, 3) in its first dimension.
-        aggregate:      str, aggregate function, default='mean'.
-        q:              float, quantile to compute on the standard deviation for aggregation if aggregate='quantile'.
-
-    Returns:
-        stat_values:    np.ndarray, array of size (n_images, 1) containing the images aggregated statistics.
-
-    """
-    # Retrieving the aggregate function
-    assert hasattr(np, aggregate), (
-        "Aggregate function {} not implemented.".format(aggregate)
-        + f"Please choose a valid argument between: {', '.join(valid_agg_func)}."
-    )
-    agg_func = getattr(np, aggregate)
-    if aggregate == "quantile":
-        agg_func = partial(agg_func, q=q)
-
-    # Computing channel std
-    channel_std = np.array(img_list).std(axis=-1)
-
-    # Aggregated the results across images in the list
-    if np.isnan(channel_std).any():
-        stat_values = np.apply_along_axis(
-            arr=channel_std, func1d=lambda x: agg_func(x[~np.isnan(x)]), axis=1
-        )
-    else:
-        stat_values = agg_func(
-            channel_std[~np.isnan(channel_std)].reshape(len(img_list), -1), axis=-1
-        )
-
-    # Returning the results
-    return stat_values.reshape(len(img_list), -1)
-
-
 def hog_selection(
     img_list: list[np.ndarray],
     hog_thresh: float = 0.5,
@@ -487,6 +478,8 @@ def hog_selection(
     pixels_per_cell: tuple[int, int] = (16, 16),
     cells_per_block: tuple[int, int] = (1, 1),
     use_grayscale: bool = False,
+    *args,
+    **kwargs,
 ):
     """
     Compute HOG descriptors and filter the images contained in `img_list` based on the mean and std HOG values:
@@ -536,6 +529,68 @@ def hog_selection(
     return np.argwhere(hog_filter).squeeze()
 
 
+def hog_selection_torch(
+    img_list: list[np.ndarray] | np.ndarray,
+    hog_thresh: float = 0.5,
+    hog_std_thresh: float | None = None,
+    orientations: int = 9,
+    pixels_per_cell: int = 16,
+    cells_per_block: int = 2,
+    use_grayscale: bool = False,
+    device: str = "cpu",
+    batch_size: int = 1024,
+    num_workers: int = 0,
+):
+    """
+    Torch version of hog_selection.
+
+    Args:
+        img_list: list of array or array of shape (B, H, W, C)
+    Returns:
+        idx_selected: list[int]
+    """
+    loader = safe_loader(
+        img_list,
+        batch_size=batch_size,
+        num_workers=num_workers,
+    )
+
+    hog = torch_hog.HOG(
+        cellSize=pixels_per_cell,
+        blockSize=cells_per_block,
+        nPhaseBins=orientations,
+        kernel="finite",
+        normalization="L2",
+        accumulate="simple",
+        channelWise=True,
+    ).to(device)
+
+    selected_indices = []
+    with torch.no_grad():
+        for batch, idxs in loader:
+            # Move batch only
+            # torch_hog looks GPU-ready, but is not fully CUDA-safe
+            batch = batch.to(device)
+            batch = batch.permute(0, 3, 1, 2)  # (B, C, H, W)
+            if use_grayscale:
+                batch = rgb_to_grayscale(batch)
+
+            hog_imgs = hog.visualize(
+                batch
+            )  # (B, C, H, W) ask lily why we use the image and not the hog feats?
+
+            hog_flat = hog_imgs.reshape(hog_imgs.shape[0], -1)
+            hog_means = hog_flat.mean(dim=1)
+            hog_filter = hog_means >= hog_thresh
+
+            if hog_std_thresh is not None:
+                hog_stds = hog_flat.std(dim=1)
+                hog_filter &= hog_stds >= hog_std_thresh
+
+            selected_indices += idxs[hog_filter].cpu().tolist()
+    return np.array(selected_indices)
+
+
 def patch_mean_pooling(
     img: np.ndarray, patch_size: int | tuple[int, int]
 ) -> np.ndarray:
@@ -579,6 +634,157 @@ def patch_mean_pooling(
 
     # Returning the averaged image per patch
     return mean_img
+
+
+# torch implementation OK
+def patch_mean_pooling_torch(
+    img: torch.Tensor, patch_size: int | tuple[int, int]
+) -> torch.Tensor:
+    """
+    Average pooling over patches of size `patch_size` in the given image.
+
+    Args:
+        img:            torch.Tensor, array of size (batch, n_row, n_col, n_channels) containing the image to average over.
+        patch_size:     int or tuple of ints, size of the patches to average over.
+
+    Returns:
+        mean_img:       torch.Tensor, array of size (batch, n_patch_row, n_patch_col, n_channels) containing the image averaged
+                        over the patches.
+
+    """
+
+    # Parsing patch size
+    if isinstance(patch_size, int):
+        pw, ph = patch_size, patch_size
+    else:
+        pw, ph = patch_size
+
+    # convert to NCHW
+    img = img.permute(0, 3, 1, 2)  # B, C, W, H
+
+    # Crop to valid size
+    # Or use padding
+
+    # Returning the averaged image per patch
+    valid = ~torch.isnan(img)
+    img_safe = torch.where(valid, img, torch.zeros_like(img))
+
+    pooled_sum = F.avg_pool2d(
+        img_safe,
+        kernel_size=(pw, ph),
+        stride=(pw, ph),
+        divisor_override=1,
+    )
+
+    pooled_count = F.avg_pool2d(
+        valid.float(),
+        kernel_size=(pw, ph),
+        stride=(pw, ph),
+        divisor_override=1,
+    )
+
+    mean_img = pooled_sum / pooled_count
+    mean_img[pooled_count == 0] = torch.nan
+
+    return mean_img.permute(0, 2, 3, 1)  # B, W, H, C
+
+
+def compute_channel_std(
+    img_list: list[np.ndarray] | np.ndarray, aggregate: str = "mean", q: float = 0.5
+):
+    """
+    Compute the standard deviation between the channel for each pixel in the image and for each image in the list.
+    Aggregate the results with the `aggregate` argument.
+
+    Args:
+        img_list:       list of np.ndarray or np.ndarray, list containing the images or array containing the flattened
+                        images (n_pixels, 3) in its first dimension.
+        aggregate:      str, aggregate function, default='mean'.
+        q:              float, quantile to compute on the standard deviation for aggregation if aggregate='quantile'.
+
+    Returns:
+        stat_values:    np.ndarray, array of size (n_images, 1) containing the images aggregated statistics.
+
+    """
+    # Retrieving the aggregate function
+    assert hasattr(np, aggregate), (
+        "Aggregate function {} not implemented.".format(aggregate)
+        + f"Please choose a valid argument between: {', '.join(valid_agg_func)}."
+    )
+    agg_func = getattr(np, aggregate)
+    if aggregate == "quantile":
+        agg_func = partial(agg_func, q=q)
+
+    # Computing channel std
+    channel_std = np.array(img_list).std(axis=-1)
+
+    # Aggregated the results across images in the list
+    if np.isnan(channel_std).any():
+        stat_values = np.apply_along_axis(
+            arr=channel_std, func1d=lambda x: agg_func(x[~np.isnan(x)]), axis=1
+        )
+    else:
+        stat_values = agg_func(
+            channel_std[~np.isnan(channel_std)].reshape(len(img_list), -1), axis=-1
+        )
+
+    # Returning the results
+    return stat_values.reshape(len(img_list), -1)
+
+
+# torch implementation OK
+def compute_channel_std_torch(
+    img_list: list[torch.Tensor] | torch.Tensor, aggregate: str = "mean", q: float = 0.5
+):
+    """
+    Compute the standard deviation between the channel for each pixel in the image and for each image in the list.
+    Aggregate the results with the `aggregate` argument.
+
+    Args:
+        img_list:       list of torch.Tensor or torch.Tensor, list containing the images or tensor containing the flattened
+                        images (n_pixels, 3) in its first dimension.
+        aggregate:      str, aggregate function, default='mean'.
+        q:              float, quantile to compute on the standard deviation for aggregation if aggregate='quantile'.
+
+    Returns:
+        stat_values:    np.ndarray, array of size (n_images, 1) containing the images aggregated statistics.
+
+    """
+    # Convert input to tensor
+    if isinstance(img_list, (list, tuple)):
+        imgs = torch.stack(img_list, dim=0)
+    else:
+        imgs = img_list
+
+    # imgs: (B, N, 3)
+    assert imgs.ndim == 3 and imgs.shape[-1] == 3, "Expected input of shape (B, WxH, 3)"
+
+    # Retrieving the aggregate function
+    if aggregate == "quantile":
+        agg_func = lambda t: torch.quantile(t, q=q, dim=-1)
+    else:
+        assert hasattr(torch, aggregate), (
+            "Aggregate function {} not implemented.".format(aggregate)
+            + f"Please choose a valid argument between: {', '.join(valid_agg_func)}."
+        )
+        agg_func = lambda t: getattr(torch, aggregate)(t, dim=-1)
+
+    # Computing channel std
+    channel_std = imgs.std(dim=-1)
+
+    # Aggregated the results across images in the list
+    if torch.isnan(channel_std).any():
+        # fallback per-image (matches np.apply_along_axis logic)
+        out = []
+        for i in range(channel_std.shape[0]):
+            vals = channel_std[i]
+            vals = vals[~torch.isnan(vals)]
+            out.append(agg_func(vals))
+        stat_values = torch.stack(out)
+    else:
+        stat_values = agg_func(channel_std)
+
+    return stat_values.reshape(-1, 1)
 
 
 def color_filter_selection(
@@ -635,7 +841,6 @@ def color_filter_selection(
         f"The statistic function given is not implemented. "
         + f"\nPlease specify a valid `stat_fct` value among: {', '.join(valid_stat_func)}."
     )
-
     # Retrieving the statistic function
     if stat_fct == "quantile":
         stat_fn = partial(np.quantile, q=q, axis=-2)
@@ -688,6 +893,117 @@ def color_filter_selection(
     return idx_selected
 
 
+# torch implementation OK
+def color_filter_selection_torch(
+    img_list: list[np.ndarray] | np.ndarray,
+    color_thresh: tuple[int, int, int] | int,
+    stat_fct: str = "quantile",
+    q: float = 0.05,
+    remove_background: bool = True,
+    background_thresh: tuple[int, int, int] | int = 245,
+    local_average: bool = True,
+    filter_size: tuple[int, int] | int = 16,
+    filter_all: bool = False,
+    background_average: bool = True,
+    aggregate: str = "mean",
+    device: str = "cpu",
+    batch_size: int = 1024,
+    num_workers: int = 0,
+) -> list[int]:
+    """
+    Filter the images contained in `img_list` based on their mean value if q is None or the `q`-th quantile value
+    otherwise. This statistic is computed for each channel (R,G,B) and compared to the color threshold value.
+
+    Args:
+        img_list:           list of np.ndarray, list containing the images to filter based on their color threshold.
+        color_thresh:       tuple of int or int, color threshold for each channel (R,G,B).
+        stat_fct:           str, statistic to compute and compare its value to the threshold, default='quantile'.
+        q:                  float, quantile to compute for comparing to the threshold, default=0.1.
+        remove_background:  bool, whether to remove the background before computing the color statistic threshold.
+        background_thresh:  tuple of int or int, color threshold for detecting background for each channel (R,G,B),
+                            default=245.
+        local_average:      bool, whether to compute the local average before computing the statistic value, default=False.
+        filter_size:        tuple of int or int, size of the patches to perform local averaging before computing the
+                            statistic, default=None, meaning no local averaging is performed beforehand.
+        filter_all:         bool, whether the criterion on the color threshold has to be met for all channel or only one,
+                            default=False.
+        background_average: bool, whether to compute the background on the patche average before or not, default=True.
+        aggregate:          str, aggregate function for the channel standard deviation aggregation, default='mean'.
+        device:             use gpu acceleration or not.
+
+    Returns:
+        idx_selected:       list of int, list containing the indices of the selected images.
+
+    """
+    # cast to tensor
+    loader = safe_loader(
+        img_list,
+        batch_size=batch_size,
+        num_workers=num_workers,
+    )
+
+    # Parsing color threshold argument
+    if isinstance(color_thresh, int):
+        color_thresh = (color_thresh, color_thresh, color_thresh)
+    color_thresh = torch.tensor(color_thresh, device=device)
+
+    if remove_background and isinstance(background_thresh, int):
+        background_thresh = (background_thresh, background_thresh, background_thresh)
+        background_thresh = torch.tensor(background_thresh, device=device)
+
+    # Checking valid value of color_thresh
+    assert (
+        color_thresh is not None
+    ), f"No color threshold was given to filter the patches. \nPlease specify a `color_thresh` value."
+
+    # Retrieving the statistic to compute
+    assert stat_fct in valid_stat_func, (
+        f"The statistic function given is not implemented. "
+        + f"\nPlease specify a valid `stat_fct` value among: {', '.join(valid_stat_func)}."
+    )
+
+    # Retrieving the statistic function
+    if stat_fct == "quantile":
+        stat_fn = lambda x: torch.quantile(x, q=q, dim=-2)  # is it the right dim?
+    elif stat_fct == "channel_std":
+        stat_fn = partial(compute_channel_std_torch, aggregate=aggregate)
+    else:
+        stat_fn = lambda x: getattr(torch, stat_fct)(x, dim=-2)  # is it the right dim?
+
+    idx_selected = []
+    with torch.no_grad():
+        for batch, idxs in loader:
+            # Move batch only
+            batch = batch.to(device)
+            B = batch.shape[0]
+            # Removing background on image before computing the local average
+            if remove_background and not background_average:
+                mask = (batch >= background_thresh).any(dim=-1, keepdim=True)
+                batch = batch.masked_fill(mask, torch.nan)
+
+            # Local averaging of the input
+            if local_average:
+                batch = patch_mean_pooling_torch(batch, filter_size)
+
+            if remove_background and background_average:
+                mask = (batch < background_thresh).any(dim=-1, keepdim=True)
+                batch = batch.masked_fill(mask, torch.nan)
+                flat = batch.reshape(B, -1, 3)
+                stat_values = stat_fn(flat)
+
+            else:
+                flat = batch.reshape(B, -1, 3)
+                stat_values = stat_fn(flat)
+
+            # Filter for the images based on the channels' minimum color threshold
+            mask = stat_values >= color_thresh
+            img_filter = mask.all(dim=-1) if filter_all else mask.any(dim=-1)
+            # Retrieving the indices selected
+            idx_selected += idxs[img_filter].tolist()
+    # Returning selected indices
+    return idx_selected
+
+
 def filter_gray_img(
     img_list: list[np.ndarray] | np.ndarray,
     std_thresh: int,
@@ -717,6 +1033,50 @@ def filter_gray_img(
 
     # Color filter based on channel std
     idx_selected = color_filter_selection(
+        img_list=img_list,
+        color_thresh=std_thresh,
+        stat_fct="channel_std",
+        remove_background=remove_background,
+        background_thresh=background_thresh,
+        local_average=local_average,
+        filter_size=filter_size,
+        aggregate=aggregate,
+    )
+
+    # Returning selected indices
+    return idx_selected
+
+
+# torch implementation OK
+def filter_gray_img_torch(
+    img_list: list[np.ndarray] | np.ndarray,
+    std_thresh: int,
+    remove_background: bool = True,
+    background_thresh: int | tuple[int, int, int] = 245,
+    local_average: bool = True,
+    filter_size: int | tuple[int, int] = 16,
+    aggregate: str = "mean",
+):
+    """
+    Filter images containing gray pixels on average (channel std < std_thresh) after having removed the background.
+
+    Args:
+        img_list:               list of np.ndarrays or np.ndarrays, list containing the images to be filtered.
+        std_thresh:             int, standard deviation across channel threshold.
+        remove_background:      bool, whether to remove the background before computing the channel std, default=True.
+        background_thresh:      int or tuple of int, color threshold for each channel (R,G,B), default=245.
+        local_average:          bool, whether to compute the local average before computing the channel std, default=True.
+        filter_size:            int or tuple of int, size of the patches on which to perform local averaging before
+                                computing the channel std, default=16.
+        aggregate:              str, aggregate function for the channel standard deviation aggregation across patches if
+                                local averaging, default='mean'.
+
+    Returns:
+
+    """
+
+    # Color filter based on channel std
+    idx_selected = color_filter_selection_torch(
         img_list=img_list,
         color_thresh=std_thresh,
         stat_fct="channel_std",

@@ -35,8 +35,8 @@ from slide.image_processing import (
     mask_percentage,
     compute_otsu_mask,
     compute_luminosity_mask,
-    hog_selection,
-    color_filter_selection,
+    hog_selection_torch,
+    color_filter_selection_torch,
 )
 from draw.palette import mosaic
 from slide.draw import (
@@ -58,7 +58,7 @@ class SlidePatcher:
         "otsu": compute_otsu_mask,
     }
     # Creating a dictionary to store the tile selection strategies mapping with the corresponding function
-    tile_selection_mapping = {"hog": hog_selection}
+    tile_selection_mapping = {"hog": hog_selection_torch}
 
     def __init__(
         self,
@@ -70,8 +70,10 @@ class SlidePatcher:
         patch_size: int = 256,
         overlap: int = 0,
         mask_downsample: int = 16,
+        margin: int | None = None,
         mask_tolerance: int = None,
         mask_strategy: str = "otsu",
+        custom_mask: np.ndarray = None,
         custom_xywh: np.ndarray = None,
         overwrite: bool = True,
         selection_strategy: str = None,
@@ -176,7 +178,7 @@ class SlidePatcher:
         # Computing target level's associated values
         downsample = self.mag_0 / self.mag_target
         self.pixel_size_target = pixel_size_target
-        if pixel_size_target is not None:
+        if pixel_size_target is None:
             self.pixel_size_target = self.pixel_size_0 * downsample
         self.level, self.downsample_level, self.resize_factor = (
             self.slide.get_best_level_for_downsample(downsample)
@@ -191,10 +193,12 @@ class SlidePatcher:
             self.level_mask, _, _ = self.slide.get_best_level_for_downsample(
                 self.mask_downsample
             )
+        self.margin = (margin, margin) if margin is not None else None
         self.mask_strategy = mask_strategy
         self.mask_selection = self.get_mask_strategy(
             mask_strategy=self.mask_strategy, *args, **kwargs
         )
+        self.custom_mask = custom_mask
 
         # Computing patch size and overlap in original dimensions
         self.patch_size_level = round(self.patch_size_target / self.resize_factor)
@@ -373,12 +377,15 @@ class SlidePatcher:
         Perform the tissue segmentation task on the slide and obtain the corresponding segmentation mask.
 
         Args:
-            margin:     tuple of int, the margin size of the segmentation mask on each dimension in number of pixels.
+            margin:     tuple of int, the margin size of the segmentation mask on each dimension in number of pixels
+                        at level_mask.
 
         Returns:
             seg_mask:    np.array, array containing the segmentation mask on the slide.
 
         """
+        if self.custom_mask is not None:
+            return self.custom_mask
 
         # Parsing margin default args
         if margin is None:
@@ -392,7 +399,7 @@ class SlidePatcher:
         mask = self.mask_selection(self.slide, self.level_mask, margin=margin)
 
         # Returning segmentation mask
-        return mask
+        return mask, margin
 
     def patch_sampling(
         self,
@@ -427,8 +434,16 @@ class SlidePatcher:
 
         # Tissue segmentation task and retrieving useful coordinates and sizes at the
         # original resolution for patching
-        mask = self.get_seg_mask()
-        min_row, min_col, max_row, max_col = 0, 0, mask.shape[0], mask.shape[1]
+
+        mask, margin = self.get_seg_mask(self.margin)
+
+        min_row, min_col, max_row, max_col = (
+            margin[0],
+            margin[1],
+            mask.shape[0] - margin[0],
+            mask.shape[1] - margin[1],
+        )
+
         point_start_mask = min_row, min_col
         point_end_mask = max_row, max_col
 
@@ -650,7 +665,7 @@ class SlidePatcher:
             aggregate = self.aggregate
 
         # Filtering patches based on mean color value for each channel
-        return color_filter_selection(
+        return color_filter_selection_torch(
             img_list,
             color_thresh=color_thresh,
             stat_fct=stat_fct,
@@ -688,7 +703,6 @@ class SlidePatcher:
             idx_selected:   list of int, the index of the patches selected in the slide if return_idx=True.
 
         """
-
         # Parsing default args
         if color_filter is None:
             color_filter = True if self.color_thresh is not None else False
@@ -696,9 +710,7 @@ class SlidePatcher:
             select_tiles = True if self.tile_selection is not None else False
 
         # Retrieving all valid tiles
-        tiles = []
-        for patch in patch_list:
-            tiles.append(self.get_tile(*patch))
+        tiles = self.get_all_tiles(patch_list)
 
         # Performing tile selection using the selection strategy
         if select_tiles:
@@ -764,6 +776,46 @@ class SlidePatcher:
         # Returning the tile
         return tile
 
+    def get_all_tiles(
+        self, patch_list: list[list[int]] | None = None
+    ) -> list[PIL.Image.Image] | list[np.ndarray]:
+        """
+        Get all the tile in patch_list at once at the original resolution.
+
+        Args:
+
+        Returns:
+            tiles:   list of PIL.Image.Image or np.ndarray, all tiles retrieved in the slide.
+            Its format will match the format of the slide.
+
+        """
+        if patch_list is None:
+            patch_list = self.valid_patches
+
+        # Get the tile from the slide's PIL image
+        if self.pil:
+            whole = self.slide.read_whole(self.level, numpy=False).convert("RGB")
+            tiles = [
+                whole.crop((x, y, x + w, y + h)).resize(
+                    (self.patch_size_target, self.patch_size_target)
+                )
+                for (x, y, w, h) in self.valid_patches
+            ]
+
+        # Get the tile from the slide's array
+        else:
+            whole = self.slide.read_whole(self.level, numpy=True)
+            tiles = [
+                cv2.resize(
+                    whole[y : y + h, x : x + w],
+                    (self.patch_size_target, self.patch_size_target),
+                )[:, :, :3]
+                for (x, y, w, h) in self.valid_patches
+            ]
+
+        # Returning the tile
+        return tiles
+
     def get_thumbnail(
         self, size: tuple[int, int], numpy: bool = False
     ) -> np.ndarray | PIL.Image.Image:
@@ -806,8 +858,8 @@ class SlidePatcher:
         """
 
         # Computing segmentation mask
-        mask = self.get_seg_mask().astype(np.uint8) * 255
-
+        mask, _ = self.get_seg_mask(self.margin)
+        mask = mask.astype(np.uint8) * 255
         # Creating annotations
         slide_attrs = {
             "size": (self.width, self.height),
@@ -1016,9 +1068,11 @@ class SlidePatcher:
                 "target_mpp": self.pixel_size_target,
                 "target_overlap": self.overlap_target,
                 "level": self.level,
+                "level_size": self.slide.level_dimensions[self.level],
                 "level_patch_size": self.patch_size_level,
                 "level_overlap": self.overlap_level,
                 "tissue_thr": self.mask_tolerance,
+                "mask": self.mask_strategy,
                 "name": self.slide.name,
                 "savetodir": dst,
             }
@@ -1042,6 +1096,7 @@ class SlidePatcher:
 
         # Returning the path to the patch file
         return patch_file
+
 
 # could add image meta (size, mag, mpp if known)
 class ImageEncoder:
@@ -1096,7 +1151,7 @@ class ImageEncoder:
             if self.feat_only:
                 return feat
             else:
-                img = self.get_image(index, numpy= not self.pil)
+                img = self.get_image(index, numpy=not self.pil)
                 return img, feat
         else:
             raise IndexError("Index out of range")
@@ -1108,7 +1163,7 @@ class ImageEncoder:
         else:
             path = img
             img = PIL.Image.open(path)
-            if not numpy: 
+            if not numpy:
                 return img, path
             img = np.asarray(img)
             if len(img.shape) == 2:
@@ -1116,7 +1171,7 @@ class ImageEncoder:
             if img.dtype not in [np.uint8, np.float32]:
                 img = np.float32(img)
             return img, path
-    
+
     def progress_bar(self, lenght, verbose):
         progress = tqdm(
             desc=f"Images enc with {self.encoder.enc_name}",
@@ -1177,9 +1232,7 @@ class ImageEncoder:
                 "features": {
                     "encoder": self.encoder.enc_name,
                 },
-                "images": {
-                    "paths": paths
-                },
+                "images": {"paths": paths},
             }
             save_h5(
                 features_path,
@@ -1190,6 +1243,7 @@ class ImageEncoder:
         else:
             raise ValueError(f"Invalid save_as: {save_as}. Only h5 is supported.")
         return features_path
+
 
 class ImageSampler(Dataset):
     """Dataset from a WSI patcher to read tiles"""
@@ -1213,10 +1267,11 @@ class ImageSampler(Dataset):
             img = torch.tensor(img)
         if self.transform:
             img = self.transform(img)
-        return img  
-    
-    
+        return img
+
+
 # class TileEncoder
+# enable TileEncoding without custom coords_path
 class TileEncoder:
     def __init__(
         self,
@@ -1302,6 +1357,7 @@ class TileEncoder:
             self.patch_size_target = self.tile_attr.get("target_patch_size", None)
             self.overlap_target = self.tile_attr.get("target_overlap", None)
             self.level = self.tile_attr.get("level", None)
+            self.level_size = self.tile_attr.get("level_size", None)
             self.patch_size_level = self.tile_attr.get("level_patch_size", None)
             self.overlap_level = self.tile_attr.get("level_overlap", None)
             self.tissu_thr = self.tile_attr.get("tissu_thr", None)
@@ -1357,7 +1413,11 @@ class TileEncoder:
         return features.shape[0], features
 
     def leiden_patch_features(
-        self, pcs: int | None = None, neighbors: int = 50, resolution: float = 0.3
+        self,
+        pcs: int | None = None,
+        neighbors: int = 50,
+        resolution: float = 0.3,
+        solver: str = "arpack",
     ):
         features_clustered = ad.AnnData(
             X=self.features,
@@ -1365,7 +1425,7 @@ class TileEncoder:
         )
         pcs = min(pcs, *(self.features.shape))
         if pcs > 0:
-            sc.pp.pca(features_clustered, n_comps=pcs)
+            sc.pp.pca(features_clustered, n_comps=pcs, svd_solver=solver)
 
         neighbors = min(neighbors, self.features.shape[0] - 1)
         sc.pp.neighbors(
@@ -1380,13 +1440,15 @@ class TileEncoder:
         )
         return features_clustered
 
-    def rgb_patch_features(self, pcs: int = 3):
+    def rgb_patch_features(self, pcs: int = 3, solver: str = "arpack"):
         features_rgb = ad.AnnData(
             X=self.features,
             obs=pd.DataFrame(self.tile_coords, columns=["x", "y", "w", "h"]),
         )
         pcs = min(pcs, *(self.features.shape))
-        sc.pp.pca(features_rgb, n_comps=pcs)
+        if pcs < 3:
+            solver = "full"
+        sc.pp.pca(features_rgb, n_comps=pcs, svd_solver=solver)
 
         scaler = MinMaxScaler()
         scaled_features_rgb = scaler.fit_transform(features_rgb.obsm["X_pca"])
@@ -1410,7 +1472,6 @@ class TileEncoder:
         emb_data = visualization(**kwargs)
 
         fig, ax = plt.subplots(1, 1, figsize=(10, 10), layout="constrained")
-
         if method == "leiden":
             visualise_tile_feat(
                 self.slide,
@@ -1489,8 +1550,11 @@ class PatchSampler(Dataset):
         if self.transform:
             tile = self.transform(tile)
         return tile, (x, y, w, h)
-    
+
+
 from slide.slide_encoder.load import SLIDE_TO_TILE_ENCODER_MATCH
+
+
 @torch.inference_mode()
 def aggragate_tiles_features(
     features_path: str,
@@ -1666,7 +1730,7 @@ class EncodingSampler(Dataset):
                 f"Invalid sampler: {sampler_name}."
                 + f"\nPlease choose a valid sampler from : {', '.join(self.valid_samplers)}"
             )
-        
+
         self.sample_ids, self.sample_feats = self.get_feat()
 
     def __len__(self):
@@ -1676,10 +1740,10 @@ class EncodingSampler(Dataset):
             n_tiles:    int, total number of tiles.
         """
         return self.total_tiles
-    
+
     def __getitem__(self, idx):
         return self.sample_ids[idx], self.sample_feats[idx]
-    
+
     def get_feat(self) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Sample tiles and get their corresponding features.
