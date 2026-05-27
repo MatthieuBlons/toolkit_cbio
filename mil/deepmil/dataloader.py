@@ -4,20 +4,51 @@ import pandas as pd
 import numpy as np
 import torch
 from slide.tile import EncodingSampler
+from slide.utils import read_h5_coords, read_h5_features
 from functools import reduce
 from collections import Counter
 from sklearn.model_selection import StratifiedShuffleSplit
 from collections import Counter
 import os
-import h5py
+from functools import partial
 
 
-def collate_variable_size(
+def collate_variable_size_old(
     batch,
 ):  # if constant_size is False we have to process a batch as a list of tensors (of different tilesxfeatures sizes)
     data = [item[0].unsqueeze(0) for item in batch]
     target = [torch.FloatTensor([item[1]]) for item in batch]
     return [data, target]
+
+
+def collate_variable_size(batch, with_coords=False):
+    """
+    batch:
+        if with_coords=True:
+            [((feats, coords), target), ...]
+        else:
+            [(feats, target), ...]
+
+    returns:
+        if with_coords:
+            (feats_list, coords_list), targets
+        else:
+            feats_list, targets
+    """
+
+    data = []
+    targets = []
+
+    if with_coords:
+        for (feats, coords), target in batch:
+            data.append((feats.unsqueeze(0), coords))
+            targets.append(torch.as_tensor([target]).float())
+    else:
+        for feats, target in batch:
+            data.append(feats.unsqueeze(0))
+            targets.append(torch.as_tensor([target]).float())
+
+    return [data, targets]
 
 
 class WSIEncoded(Dataset):
@@ -33,7 +64,7 @@ class WSIEncoded(Dataset):
         * a test columns, stating the test_fold number of each image.
     """
 
-    def __init__(self, args, use_train, predict=False):
+    def __init__(self, args, use_train, with_coords=False, predict=False):
         """Initialises the MIL model.
 
         Parameters
@@ -55,6 +86,7 @@ class WSIEncoded(Dataset):
         self.args = args
         self.embeddings_dir = args.wsi_dir
         self.use_train = use_train
+        self.with_coords = with_coords
         self.predict = predict
         self.target_table = pd.read_csv(args.target_path)
         (
@@ -65,88 +97,29 @@ class WSIEncoded(Dataset):
         ) = self._make_db()
         self.constant_size = args.constant_size
 
-    def _make_db(self):
-        """_make_db.
-        Creates the dataset. Namely, populates the files list
-        with the selected WSI.
-        Populates also 3 dictionnary, with keys the elements of the files list
-        and values :
-            * target_dict : their target values
-            * stratif_dict : their stratif values (present in the target_table).
-            * sampler_dict : their associated TileSampler object.
-
-        :return [files, target_dict, sampler_dict, stratif_dict, label_encoder]
-        """
-        table, label_encoder = self.transform_target()
-        target_dict = dict()  # Key = path to the file, value=target
-        stratif_dict = dict()
-        names = table["ID"].values
-        files_filtered = []
-        for name in names:
-            # do not check extension here?
-            filepath = os.path.join(
-                self.embeddings_dir, name + f".{self.args.wsi_format}"
-            )
-            if os.path.exists(filepath):
-                if self._is_in_db(name):
-                    files_filtered.append(filepath)
-                    target_dict[filepath] = np.float32(
-                        table[table["ID"] == name]["target"].values[0]
-                    )
-                    stratif_dict[filepath] = table[table["ID"] == name][
-                        "stratif"
-                    ].values[0]
-
-        return files_filtered, target_dict, stratif_dict, label_encoder
-
-    def transform_target(self):
-        """Adds to table a numerical encoding of the target.
-        Each class is a natural number. Good format for classif using nn.CrossEntropy
-        New columns is named "target"
-        """
-        tmp = self.target_table
-        targets = tmp[self.args.target_name].values
-        label_encoder = LabelEncoder().fit(targets)
-        tmp["target"] = label_encoder.transform(targets)
-        self.target_table = tmp
-        return tmp, label_encoder
-
-    def get_embeddings(self, path):
-        with h5py.File(path, "r") as f:
-            attrs = dict(f["features"].attrs)
-            feats = f["features"][:]
-        return attrs, feats
-
-    def _is_in_db(self, name):
-        """Do we keep the file in the dataset ?"""
-        table = self.target_table
-        is_in_db = True
-        if "test" in table.columns and (not self.predict):
-            is_in_train = (
-                table[table["ID"] == name]["test"] != self.args.test_fold
-            ).values[
-                0
-            ]  # "keep if i'm not test"
-            is_in_test = (
-                table[table["ID"] == name]["test"] == self.args.test_fold
-            ).values[0]
-            is_in_db = is_in_train if self.use_train else is_in_test
-        return is_in_db
-
     def __len__(self):
         return len(self.files)
 
+    # Slide level encoding does not make sense in the MIL framework
     def __getitem__(self, idx):
         path = self.files[idx]
+        target = self.target_dict[path]
         _, feats = self.get_embeddings(path)
         if self.args.wsi_enc == "tile":
             mat = feats[:, : self.args.feature_dim]
-            mat = self._select_tiles(path, mat)
+            mat, indices = self._select_tiles(path, mat)
+            mat = torch.from_numpy(mat).float()
+            if self.with_coords:
+                _, coords = self.get_coords(path)
+                coords = coords[indices, :2]
+                coords = torch.from_numpy(coords).float()
+                return (mat, coords), target
+            else:
+                return mat, target
         elif self.args.wsi_enc == "slide":
             mat = feats[: self.args.feature_dim]
-        mat = torch.from_numpy(mat).float()
-        target = self.target_dict[path]
-        return mat, target
+            mat = torch.from_numpy(mat).float()
+            return mat, target
 
     def _select_tiles(self, path, mat):
         """_select_tiles.
@@ -171,7 +144,80 @@ class WSIEncoded(Dataset):
             )
             indices = test_sampler.sampler()
             mat = mat[indices, :]
-        return mat
+        return mat, indices
+
+    def get_embeddings(self, path):
+        attrs, feats = read_h5_features(path)
+        return attrs, feats
+
+    def get_coords(self, path):
+        attrs, coords = read_h5_coords(path)
+        slide_size = attrs.get("level_size", None)
+        if slide_size is not None:
+            coords /= slide_size
+        return attrs, coords
+
+    def _make_db(self):
+        """_make_db.
+        Creates the dataset. Namely, populates the files list
+        with the selected WSI.
+        Populates also 3 dictionnary, with keys the elements of the files list
+        and values :
+            * target_dict : their target values
+            * stratif_dict : their stratif values (present in the target_table).
+            * sampler_dict : their associated TileSampler object.
+
+        :return [files, target_dict, sampler_dict, stratif_dict, label_encoder]
+        """
+        table, label_encoder = self._transform_target()
+        target_dict = dict()  # Key = path to the file, value=target
+        stratif_dict = dict()
+        names = table["ID"].values
+        files_filtered = []
+        for name in names:
+            # do not check extension here?
+            filepath = os.path.join(
+                self.embeddings_dir, name + f".{self.args.wsi_format}"
+            )
+            if os.path.exists(filepath):
+                if self._is_in_db(name):
+                    files_filtered.append(filepath)
+                    target_dict[filepath] = np.float32(
+                        table[table["ID"] == name]["target"].values[0]
+                    )
+                    stratif_dict[filepath] = table[table["ID"] == name][
+                        "stratif"
+                    ].values[0]
+
+        return files_filtered, target_dict, stratif_dict, label_encoder
+
+    def _transform_target(self):
+        """Adds to table a numerical encoding of the target.
+        Each class is a natural number. Good format for classif using nn.CrossEntropy
+        New columns is named "target"
+        """
+        tmp = self.target_table
+        targets = tmp[self.args.target_name].values
+        label_encoder = LabelEncoder().fit(targets)
+        tmp["target"] = label_encoder.transform(targets)
+        self.target_table = tmp
+        return tmp, label_encoder
+
+    def _is_in_db(self, name):
+        """Do we keep the file in the dataset ?"""
+        table = self.target_table
+        is_in_db = True
+        if "test" in table.columns and (not self.predict):
+            is_in_train = (
+                table[table["ID"] == name]["test"] != self.args.test_fold
+            ).values[
+                0
+            ]  # "keep if i'm not test"
+            is_in_test = (
+                table[table["ID"] == name]["test"] == self.args.test_fold
+            ).values[0]
+            is_in_db = is_in_train if self.use_train else is_in_test
+        return is_in_db
 
 
 class Dataset_handler:
@@ -183,7 +229,7 @@ class Dataset_handler:
 
     """
 
-    def __init__(self, args, predict=False):
+    def __init__(self, args, with_coords=False, predict=False):
         """
         Generates a validation dataset and a training dataset.
         If predict=True, the training dataset contains all the dataset.
@@ -191,10 +237,11 @@ class Dataset_handler:
         self.args = args
         self.use_val = args.use_val
         self.num_class = args.num_class
+        self.with_coords = with_coords
         self.predict = predict
         self.num_workers = args.num_workers
-        self.dataset_train = self._get_dataset(use_train=True)
-        self.dataset_test = self._get_dataset(use_train=False)
+        self.dataset_train = self._get_dataset(use_train=True, with_coords=with_coords)
+        self.dataset_test = self._get_dataset(use_train=False, with_coords=with_coords)
         self.train_sampler, self.val_sampler = self._get_sampler(
             self.dataset_train, use_val=args.use_val
         )
@@ -205,7 +252,11 @@ class Dataset_handler:
         that takes all the tiles, without a sampler (taking all the dataset)
         """
         if training:
-            collate = None if self.args.constant_size else collate_variable_size
+            collate = (
+                None
+                if self.args.constant_size
+                else partial(collate_variable_size, with_coords=self.with_coords)
+            )
             dataloader_train = DataLoader(
                 dataset=self.dataset_train,
                 batch_size=self.args.batch_size,
@@ -230,7 +281,7 @@ class Dataset_handler:
             )
         return dataloaders
 
-    def _get_dataset(self, use_train):
+    def _get_dataset(self, use_train, with_coords):
         """_get_dataset.
 
         :param use_train: bool, if False, output dataset is composed of the
@@ -240,6 +291,7 @@ class Dataset_handler:
         dataset = WSIEncoded(
             self.args,
             use_train=use_train,
+            with_coords=with_coords,
             predict=self.predict,
         )
         return dataset
