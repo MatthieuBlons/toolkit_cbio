@@ -2,8 +2,8 @@
 implementing models. DeepMIL implements a models that classify a whole slide image
 """
 
-from torch.nn import MSELoss, PairwiseDistance
-from torch.nn.functional import cosine_similarity
+from torch.nn import MSELoss, PairwiseDistance, Module
+from torch.nn.functional import cosine_similarity, relu, mse_loss
 from torch.optim import AdamW
 from mil.deepmil.utils import is_in_args
 import torch
@@ -132,6 +132,7 @@ class HESingIF(Model):
     def __init__(
         self,
         args,
+        target=None,
         with_data=False,
     ):
         """
@@ -156,13 +157,16 @@ class HESingIF(Model):
             alpha=self.lora_alpha,
             target_modules=self.lora_target_modules,
         )
-        optimizer = self._get_optimizer(args)
-        self.optimizers = [optimizer]
-        self.schedulers = self._get_schedulers(args)
         self.train_loader, self.val_loader, self.target_labels = self._get_data_loaders(
             args, with_data
         )
+        if not with_data:
+            self.target_labels = target
+        optimizer = self._get_optimizer(args)
+        self.optimizers = [optimizer]
+        self.schedulers = self._get_schedulers(args)
         self.criterion = self._get_criterion(args.criterion)
+
         self.bayes = False
 
     def _get_network(self, rank=8, alpha=1, target_modules=["qkv"], lora_dropout=0.05):
@@ -242,6 +246,8 @@ class HESingIF(Model):
             data = Dataset_handler(args, preprocess=self.network.transform)
             labels = data.dataset_train.target_lables
             train_loader, val_loader = data.get_loader(training=True)
+        else:
+            labels
         return train_loader, val_loader, labels
 
     def _get_criterion(self, criterion):
@@ -252,6 +258,16 @@ class HESingIF(Model):
         """
         if criterion == "mse":
             criterion = MSELoss().to(self.args.device)
+        if criterion == "hierachy":
+            if self.target_labels is not None:
+                marker_to_idx = {
+                    target: i for i, target in enumerate(self.target_labels)
+                }
+                criterion = HierachyLoss(marker_to_idx=marker_to_idx).to(
+                    self.args.device
+                )
+            else:
+                criterion = HierachyLoss().to(self.args.device)
         return criterion
 
     def forward(self, x):
@@ -399,6 +415,7 @@ class HESingIF(Model):
             "args": self.args,
             "input_table": self.train_loader.dataset.input_table,
             "best_metrics": self.best_metrics,
+            "target": self.target_labels,
         }
         return dictio
 
@@ -406,8 +423,9 @@ class HESingIF(Model):
 def load_model_from_path(model_path, device):
     checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
     args = checkpoint["args"]
+    target = getattr(checkpoint, "target", None)
     args.device = device
-    model = HESingIF(args)
+    model = HESingIF(args, target)
     model.network.load_state_dict(checkpoint["state_dict"])
     return model
 
@@ -447,3 +465,172 @@ def pearson(x, y, dim=0, eps=1e-8):
     std_y = y.std(dim=dim)
 
     return cov / (std_x * std_y + eps)
+
+
+inequality_constraints = [
+    # total cells
+    ("CD45+", "cells"),
+    ("CD68+", "cells"),
+    ("CD163+", "cells"),
+    ("CD3e+", "cells"),
+    ("CD8a+", "cells"),
+    ("CD45R0+", "cells"),
+    ("CD20+", "cells"),
+    ("CD4+", "cells"),
+    ("FOXP3+", "cells"),
+    ("FOXP3+", "cells"),
+    ("PDL1+", "cells"),
+    ("Ki67+", "cells"),
+    ("PanCK+", "cells"),
+    ("Ecadherin+", "cells"),
+    ("CD31+", "cells"),
+    ("SMA+", "cells"),
+    # --- Immune backbone ---
+    ("CD3e+", "CD45+"),
+    ("CD20+", "CD45+"),
+    ("CD68+", "CD45+"),
+    # --- Myeloid ---
+    ("CD163+", "CD68+"),
+    ("CD163+", "CD45+"),
+    # --- T cell hierarchy ---
+    ("CD8a+", "CD3e+"),
+    ("CD8a+", "CD45+"),
+    ("CD4+", "CD3e+"),
+    ("CD4+", "CD45+"),
+    ("FOXP3+", "CD4+"),
+    ("FOXP3+", "CD3e+"),
+    ("FOXP3+", "CD45+"),
+    # --- Memory / activation ---
+    ("CD45R0+", "CD3e+"),
+    ("CD45R0+", "CD45+"),
+    ("PD1+", "CD3e+"),
+    ("PD1+", "CD45+"),
+    # --- Epithelial ---
+    ("Ecadherin+", "PanCK+"),
+]
+
+marker_to_idx = {
+    "cells": 0,
+    "CD45+": 1,
+    "CD68+": 2,
+    "CD163+": 3,
+    "CD3e+": 4,
+    "CD8a+": 5,
+    "CD45R0+": 6,
+    "CD20+": 7,
+    "CD4+": 8,
+    "FOXP3+": 9,
+    "PDL1+": 10,
+    "PD1+": 11,
+    "Ki67+": 12,
+    "PanCK+": 13,
+    "Ecadherin+": 14,
+    "CD31+": 15,
+    "SMA+": 16,
+    "ALL-": 17,
+    "BIO-": 18,
+}
+
+
+def hierarchy_penalty(
+    y_pred,
+    marker_to_idx=marker_to_idx,
+    constraints=inequality_constraints,
+    alpha=1.0,
+    power=2,
+):
+    """
+    Enforces hierarchical constraints A <= B in linear space.
+
+    Args:
+        y_pred: Tensor (B, D) — cell-count or log-space predictions
+        marker_to_idx: dict {marker_name: index}
+        constraints: list of tuples (A, B) meaning A <= B
+        alpha: scaling factor
+        eps: numerical stability for exp
+
+    Returns:
+        scalar loss
+    """
+    loss = 0.0
+
+    for A, B in constraints:
+        idx_A = marker_to_idx[A]
+        idx_B = marker_to_idx[B]
+
+        z_A = y_pred[:, idx_A]
+        z_B = y_pred[:, idx_B]
+
+        # violation: A > B
+        violation = relu(z_A - z_B)
+
+        loss += (violation**power).mean()
+
+    return alpha * loss
+
+
+class HierachyLoss(Module):
+    def __init__(
+        self,
+        marker_to_idx=marker_to_idx,
+        constraints=inequality_constraints,
+        mse_weight=1.0,
+        hierarchy_weight=1.0,
+        power=2,
+    ):
+        """
+        Combines MSE loss with hierarchy constraints.
+
+        Args:
+            marker_to_idx: dict {marker_name: index}
+            constraints: list of (A, B) meaning A <= B
+            mse_weight: weight for MSE loss
+            hierarchy_weight: weight for hierarchy penalty
+            power: exponent for violation penalty
+            eps: numerical stability
+        """
+
+        super().__init__()
+
+        self.marker_to_idx = marker_to_idx
+        self.constraints = constraints
+
+        self.mse_weight = mse_weight
+        self.hierarchy_weight = hierarchy_weight
+
+        self.power = power
+
+        # Precompute index pairs for speed
+        self.A_idx = torch.tensor([marker_to_idx[a] for a, _ in constraints])
+        self.B_idx = torch.tensor([marker_to_idx[b] for _, b in constraints])
+
+    def hierarchy_penalty(self, y_pred):
+        """
+        Vectorized hierarchy penalty: A <= B
+        """
+
+        # No need to convert to linear space for inequality check
+        z_A = y_pred[:, self.A_idx]
+        z_B = y_pred[:, self.B_idx]
+
+        # violation: A > B
+        violation = relu(z_A - z_B)
+
+        loss = (violation**self.power).mean()
+
+        return loss
+
+    def forward(self, y_pred, y_true):
+        """
+        Args:
+            y_pred: (B, D)
+            y_true: (B, D)
+        """
+
+        mse = mse_loss(y_pred, y_true)
+
+        hierarchy = self.hierarchy_penalty(y_pred)
+
+        loss = self.mse_weight * mse + self.hierarchy_weight * hierarchy
+
+        return loss

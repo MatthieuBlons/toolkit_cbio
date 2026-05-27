@@ -11,7 +11,6 @@ from torch.nn import (
     Sequential,
     Identity,
     ReLU,
-    GELU,
     Dropout,
     BatchNorm1d,
     BatchNorm2d,
@@ -40,7 +39,7 @@ class Linear_bn(Module):
         self.layer = Sequential(
             Linear(in_features=in_channels, out_features=out_channels),
             self.norm_layer(out_channels),
-            GELU(),
+            ReLU(),
             Dropout(p=dropout),
         )
 
@@ -67,37 +66,33 @@ class MLP(Module):
         self.classifier = self.mlp_classifier()
 
     def instance_transf(self):
-        transform = Linear_bn(
-            self.feature_dim,
-            self.feature_depth,
-            self.dropout,
-            use_bn=True,
+        transform = Sequential(
+            Linear(self.feature_dim, self.feature_depth),
+            ReLU(),
+            Dropout(p=self.dropout),
         )
         return transform
 
     def mlp_classifier(self):
         classifier = []
-        if self.n_layers_classif > 0:
+        classifier.append(
+            Linear_bn(
+                int(self.feature_depth),
+                self.width_fe,
+                self.dropout,
+                use_bn=True,
+            )
+        )
+        for i in range(self.n_layers_classif):
             classifier.append(
                 Linear_bn(
-                    self.feature_depth,
+                    self.width_fe,
                     self.width_fe,
                     self.dropout,
                     use_bn=True,
                 )
             )
-            for i in range(self.n_layers_classif - 1):
-                classifier.append(
-                    Linear_bn(
-                        self.width_fe,
-                        self.width_fe,
-                        self.dropout,
-                        use_bn=True,
-                    )
-                )
-            classifier.append(Linear(self.width_fe, self.output_lenght))
-        else:
-            classifier.append(Linear(self.feature_depth, self.output_lenght))
+        classifier.append(Linear(self.width_fe, self.output_lenght))
         classifier.append(ReLU())
         return Sequential(*classifier)
 
