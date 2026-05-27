@@ -87,19 +87,6 @@ def get_arguments(known_args=None, train=True, config=None):
         "--encoder",
         type=str,
         default="hoptimus1",
-        choices=[
-            "hoptimus0",
-            "hoptimus1",
-            "conch_v1",
-            "conch_v15",
-            "uni_v1",
-            "uni_v2",
-            "phikon",
-            "phikon_v2",
-            "prov_gigapath",
-            "virchow",
-            "virchow2",
-        ],
         help="name of the encoder to used.",
     )
     parser.add_argument(

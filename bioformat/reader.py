@@ -423,7 +423,7 @@ def read_ome_xml(xml, key, findall=True):
         return root.find(search, namespace)
 
 
-def vips_to_numpy(img, format):
+def vips_to_numpy(img, format=None):
     arr = img.numpy()
     if format == "ushort":
         arr = convertScaleAbs(arr, alpha=(255.0 / 65535.0))

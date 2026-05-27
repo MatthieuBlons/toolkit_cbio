@@ -89,6 +89,13 @@ def get_arguments(known_args=None, train=True, config=None):
     )
 
     parser.add_argument(
+        "--use_coords",
+        type=bool,
+        default=False,
+        help="if true dataloader will provide the tile and its coords",
+    )
+
+    parser.add_argument(
         "--sampler",
         type=str,
         choices=["all", "random", "random_strict", "niche"],
@@ -176,7 +183,8 @@ def get_arguments(known_args=None, train=True, config=None):
 
     parser.add_argument(
         "--instance_transf",
-        default=False,
+        default=None,
+        choices=["linear", "transformer", "roformer", "rposbias"],
         type=bool,
         help="wether to transform the tiles before attention and classification.",
     )
@@ -284,8 +292,10 @@ def get_arguments(known_args=None, train=True, config=None):
     if not args.instance_transf:
         args.feature_depth = args.feature_dim
 
-    # Set constant size flag
+    if args.instance_transf == "roformer" or args.instance_transf == "rposbias":
+        args.use_coords = True
 
+    # Set constant size flag
     if args.n_tiles == 0 or args.sampler != "random":
         args.constant_size = False
     else:

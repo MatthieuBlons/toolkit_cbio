@@ -76,8 +76,6 @@ class ModelHooker:
                 hook_out.register_forward_hook(self._get_outputs_hook())
 
 
-
-
 def predict(model, features, dataloader):
     """
     prediction with model on image
@@ -151,8 +149,17 @@ def predict_one_image(model, image_path):
     return outputs_dict
 
 
-def main(model_path: str, img_dir: str, input_path: str | None = None, target_path: str | None = None, verbose=0):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+def main(
+    model_path: str,
+    img_dir: str,
+    input_path: str | None = None,
+    target_path: str | None = None,
+    batch_size: int =1,
+    device: str | None=None,
+    verbose: int=0,
+):
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
     print(f"device used = {device}")
     model = load_model_from_path(model_path, device)
@@ -174,6 +181,7 @@ def main(model_path: str, img_dir: str, input_path: str | None = None, target_pa
     args.img_dir = img_dir
     args.input_path = input_path
     args.target_path = None
+    args.batch_size = batch_size
 
     print_dict(args.__dict__, name="model args for pred")
 

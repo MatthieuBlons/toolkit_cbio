@@ -132,7 +132,7 @@ def map_cell_feat(
         reader = get_slide_reader(slide)
         slide = reader(slide)
 
-    if level_to_view > slide.level_count:
+    if level_to_view >= slide.level_count:
         print(
             f"downsampling level={level_to_view} is not accessible, use level={slide.level_count-1} instead"
         )
@@ -245,9 +245,9 @@ def visualise_tile_feat(
     cmap: plt.cm = plt.cm.jet,
     alpha: float = 0.6,
     smooth: int | None = None,
-    limits: tuple[float, float] = (0, 1),
+    limits: tuple[float, float] | None = None,
     ax: axes.Axes | None = None,
-    legend: list | None= None,
+    legend: list | None = None,
     title: str | None = None,
     loc: str = "right",
     show: bool = True,
@@ -286,7 +286,7 @@ def visualise_tile_feat(
         slide = reader(slide)
 
     # check downsampling level
-    if level_to_view > slide.level_count:
+    if level_to_view >= slide.level_count:
         print(
             f"downsampling level={level_to_view} is not accessible, use level={slide.level_count-1} instead"
         )
@@ -311,7 +311,10 @@ def visualise_tile_feat(
 
     # normalize features
     values = data[feat].values
-    vmin, vmax = limits
+    if limits is not None:
+        vmin, vmax = limits
+    else:
+        vmin, vmax = values.min(), values.max()
     norm = plt.Normalize(vmin, vmax)
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
@@ -359,6 +362,104 @@ def visualise_tile_feat(
         plt.colorbar(sm, ax=ax, label=feat, location=loc)
     if show:
         plt.show()
+
+
+def make_feature_thumbnail(
+    slide: str | OpenWSI | OpenOME | openslide.OpenSlide,
+    data: pd.DataFrame,
+    feat: str,
+    region: tuple[int, int] = (0, 0),
+    size: tuple[int, int] | None = None,
+    analyse_level: int = 0,
+    level_to_view: int = 0,
+    normalize: str | None = None,
+    smooth: int | None = None,
+    rgb: bool = False,
+    numpy: bool = True,
+    feat_only: bool = True,
+):
+    # read slide if path is provided
+    if isinstance(slide, str):
+        reader = get_slide_reader(slide)
+        slide = reader(slide)
+
+    # check downsampling level
+    if level_to_view >= slide.level_count:
+        print(
+            f"downsampling level={level_to_view} is not accessible, use level={slide.level_count-1} instead"
+        )
+        level_to_view = slide.level_count - 1
+
+    down_analyse = slide.level_downsamples[analyse_level]
+    down_view = slide.level_downsamples[level_to_view]
+
+    if not size:
+        size = slide.level_dimensions[analyse_level]
+        dim_view = slide.level_dimensions[level_to_view]
+    else:
+        dim_view = (
+            int(size[0] * (down_analyse / down_view)),
+            int(size[1] * (down_analyse / down_view)),
+        )
+
+    # get whole image
+    wsi = slide.read_region(
+        location=region, level=level_to_view, size=dim_view, numpy=numpy
+    )
+
+    # normalize features
+    feats = data[feat].values
+    if normalize == "minmax":
+        feats_norm = (feats - feats.min()) / (feats.max() - feats.min())
+    elif normalize == "max":
+        feats_norm = feats / feats.max()
+    else:
+        feats_norm = feats
+    # Vectorized coordinates and sizes
+    xs = data["x"].values
+    ys = data["y"].values
+    ws = data["w"].values
+    hs = data["h"].values
+
+    # Filter tiles that intersect the selected region
+    x0, y0 = region
+    W, H = size
+
+    mask = (xs + ws >= x0) & (xs < x0 + W) & (ys + hs >= y0) & (ys < y0 + H)
+
+    xs, ys, ws, hs, feats_norm = (
+        xs[mask],
+        ys[mask],
+        ws[mask],
+        hs[mask],
+        feats_norm[mask],
+    )
+
+    # Shift to region coordinates
+    xs = xs - x0
+    ys = ys - y0
+
+    # or apply get_size_to() get_x_y_to()
+    x_scaled = (xs * dim_view[0] / size[0]).astype(int)
+    y_scaled = (ys * dim_view[1] / size[1]).astype(int)
+    w_scaled = np.maximum((ws * down_analyse / down_view).astype(int), 1)
+    h_scaled = np.maximum((hs * down_analyse / down_view).astype(int), 1)
+
+    # Create transparent overlay
+    overlay = np.zeros((dim_view[1], dim_view[0]), dtype=np.float32)  # gray scale
+    for x, y, w, h, val in zip(x_scaled, y_scaled, w_scaled, h_scaled, feats_norm):
+        overlay[y : y + h + 1, x : x + w + 1] = val
+    # gaussian smoothing
+    if smooth is not None:
+        overlay = gaussian_filter(overlay, sigma=(smooth, smooth))
+
+    if not numpy:
+        overlay = Image.fromarray(overlay, mode="L")
+
+    if feat_only:
+        return overlay
+    else:
+        return overlay, wsi
 
 
 def visualise_tile_rgb(
@@ -411,7 +512,7 @@ def visualise_tile_rgb(
         slide = reader(slide)
 
     # check downsampling level
-    if level_to_view > slide.level_count:
+    if level_to_view >= slide.level_count:
         print(
             f"downsampling level={level_to_view} is not accessible, use level={slide.level_count-1} instead"
         )
@@ -459,12 +560,10 @@ def visualise_tile_rgb(
     h_scaled = np.maximum((hs * down_analyse / down_view).astype(int), 1)
 
     # Create transparent overlay
-    overlay = np.zeros((dim_view[1], dim_view[0], 4), dtype=np.float32)  # HWC RGBA
+    overlay = np.zeros((dim_view[1], dim_view[0], 4), dtype=values.dtype)  # HWC RGBA
     for x, y, w, h, rgb in zip(x_scaled, y_scaled, w_scaled, h_scaled, values):
         rgba = np.concatenate([rgb, np.ones(1) * alpha], axis=0)
-        overlay[y : y + h + 1, x : x + w + 1, :] = np.concatenate(
-            [rgb, np.ones(1) * alpha], axis=0
-        )
+        overlay[y : y + h + 1, x : x + w + 1, :] = rgba
 
     # gaussian smoothing
     if smooth is not None:
@@ -513,7 +612,7 @@ def draw_cut(
         reader = get_slide_reader(slide)
         slide = reader(slide)
 
-    if level_to_view > slide.level_count:
+    if level_to_view >= slide.level_count:
         print(
             f"downsampling level={level_to_view} is not accessible, use level={slide.level_count-1} instead"
         )
@@ -739,10 +838,6 @@ def visualize_tissue_seg(
 
 
 def make_openslide_thumbnail():
-    return None
-
-
-def make_feature_thumbnail():
     return None
 
 

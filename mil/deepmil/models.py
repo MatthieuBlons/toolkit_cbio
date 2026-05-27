@@ -12,7 +12,8 @@ from abc import ABC, abstractmethod
 from torch.utils.tensorboard import SummaryWriter
 import shutil
 import os
-from .networks import MILFactory, FocalLoss
+from .networks import MILFactory
+from .loss import FocalLoss
 from .dataloader import Dataset_handler
 
 
@@ -173,7 +174,7 @@ class DeepMIL(Model):
         """
         train_loader, val_loader = None, None
         if with_data:
-            data = Dataset_handler(args)
+            data = Dataset_handler(args, with_coords=args.use_coords)
             train_loader, val_loader = data.get_loader(training=True)
         return train_loader, val_loader
 
@@ -417,12 +418,15 @@ class DeepMIL(Model):
             output = self.forward(input_batch)
             loss = self.criterion(output, target_batch)
         # Could do better
-        else:  # We have to process a batch as a list of tensors (of different sizes)
+        else:  # We have to process a batch as a list of tensors (of different sizes) and accumulate
             loss = 0
             for o, im in enumerate(input_batch):
-                im = im.to(self.args.device)
+                if self.args.use_coords:
+                    im = (im[0].to(self.args.device), im[1].to(self.args.device))
+                else:
+                    im = im.to(self.args.device)
                 target = target_batch[o].to(self.args.device, dtype=torch.int64)
-                output = self.forward(im)
+                output = self.forward(im)                
                 loss += self.criterion(output, target)
             loss = loss / len(input_batch)
 

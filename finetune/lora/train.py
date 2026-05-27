@@ -65,7 +65,6 @@ def train(model, dataloader):
                 },
                 step=model.counter["step"],
             )
-    
     progress.close()
     model.mean_train_loss = np.mean(mean_loss)
 

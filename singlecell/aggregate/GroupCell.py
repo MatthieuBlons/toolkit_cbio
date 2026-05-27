@@ -40,7 +40,7 @@ class GroupCellFeat:
         self.group_cells(how=method, coverage=coverage)
         self.group_table = self.make_group_table()
 
-        # save cells table and groupe table if dst is provided
+        # save cells table and group table if dst is provided
         if dst:
             self.cell_dst, self.group_dst = self.save_tables(dst)
 
@@ -113,6 +113,7 @@ class GroupCellFeat:
             "y",
             "w",
             "h",
+            "in_tile",
         ]
         group_table.drop(
             labels=cell_pos_to_drop,
@@ -196,7 +197,6 @@ class GroupCellFeat:
         feat: str,
         size: tuple = (1024, 1024),
         discrete: bool = True,
-        plot_args: dict = None,
         ax=None,
         show=False,
         save: str | None = None,
@@ -219,10 +219,10 @@ class GroupCellFeat:
             df=self.cell_table,
             feat=feat,
             analyse_level=self.coords_meta["level"],
-            res_to_view=level_to_view,
+            level_to_view=level_to_view,
             discrete=discrete,
-            plot_args=plot_args,
             ax=ax,
+            title=feat,
             show=show,
         )
 
@@ -235,7 +235,6 @@ class GroupCellFeat:
         self,
         feat: str,
         size: tuple = (1024, 1024),
-        plot_args: dict = None,
         ax=None,
         show=False,
         save: str = None,
@@ -256,9 +255,9 @@ class GroupCellFeat:
             self.group_table,
             feat,
             analyse_level=self.coords_meta["level"],
-            res_to_view=level_to_view,
-            plot_args=plot_args,
+            level_to_view=level_to_view,
             ax=ax,
+            title=feat,
             show=show,
         )
 

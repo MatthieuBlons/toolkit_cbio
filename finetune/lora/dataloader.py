@@ -52,7 +52,7 @@ class HESignature(Dataset):
             zip(self.input_table["img_path"], self.input_table["test"])
         )
         self.target_path = args.target_path
-        self.target_lables = self.fetch_labels()
+        self.target_lables = self.fetch_labels() #typo
         self.input_files, self.target_dict = self._make_db()
 
     def __len__(self):
@@ -395,7 +395,7 @@ class Dataset_handler:
         else:  # Either testing on test fold or predicting on the whole dataset (if predict = True)
             dataloaders = DataLoader(
                 dataset=self.dataset_test,
-                batch_size=1,
+                batch_size=self.batch_size,
                 num_workers=self.num_workers,
                 shuffle=False,
             )
