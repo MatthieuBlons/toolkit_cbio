@@ -22,7 +22,6 @@ def dynamic_display_range(image, smoothing_sigma=1.0, min_density_ratio=0.001):
 
     # Smooth the histogram to reduce noise
     smoothed_hist = gaussian_filter1d(hist, sigma=smoothing_sigma)
-    smoothed_hist = hist
     # Determine the peak density
     peak_density = np.max(smoothed_hist)
 
@@ -37,12 +36,29 @@ def dynamic_display_range(image, smoothing_sigma=1.0, min_density_ratio=0.001):
     return lower_bound, upper_bound
 
 
-def blend_colors(img, colors, scale_by="clip", density_ratio=0.0001, gamma=1, eps=1e-8):
+def percentil_range(image, p_low=1, p_high=99):
+    lo = np.percentile(image, p_low)
+    hi = np.percentile(image, p_high)
+    return lo, hi
+
+
+def blend_colors(
+    img,
+    colors,
+    scale_by="hist",
+    density_ratio=0.0001,
+    gammas: float | list[float] = 1,
+    alpha: float | list[float] = 1,
+    blending="add",
+    eps=1e-8,
+):
+
     if len(colors.shape) > 1:
         n_channel_color = colors.shape[1]
     else:
         n_channel_color = len(colors)
         colors = np.expand_dims(colors, axis=0)
+
     if img.ndim > 2:
         r, c, nc = img.shape[:3]
     else:
@@ -50,24 +66,51 @@ def blend_colors(img, colors, scale_by="clip", density_ratio=0.0001, gamma=1, ep
         r, c = img.shape[:2]
         img = np.expand_dims(img, axis=-1)
 
-    blended_img = np.zeros((r, c, n_channel_color))
+    relative_imgs = []
     for i in range(nc):
         channel = img[..., i]
         # relative image is how bright the channel will be
-        if scale_by != "clip":
-            relative_img = (channel - channel.min()) / (channel.max() - channel.min())
-        else:
+        if scale_by == "hist":
             lower_bound, upper_bound = dynamic_display_range(
                 channel, min_density_ratio=density_ratio
             )
-            clipped = np.clip(channel, a_min=lower_bound, a_max=upper_bound)
-            relative_img = (clipped - clipped.min()) / (clipped.max() - clipped.min() + eps)
+            channel = np.clip(channel, a_min=lower_bound, a_max=upper_bound)
+        elif scale_by == "percentile":
+            lower_bound, upper_bound = percentil_range(channel)
+            channel = np.clip(channel, a_min=lower_bound, a_max=upper_bound)
+        relative_img = (channel - channel.min()) / (channel.max() - channel.min() + eps)
 
-        # blending is how to weight the mix of colors, similar to an alpha channel
-        for j in range(n_channel_color):
-            channel_color = colors[i, j]
-            blended_img[..., j] += (channel_color / 255.0) * relative_img
-    blended_img = np.clip(blended_img, a_min=0, a_max=1)
-    blended_img = np.power(blended_img, gamma)
-    blended_img = (blended_img * 255).astype(np.uint8)
+        if isinstance(gammas, list):
+            assert (
+                len(gammas) == nc
+            ), "if you want per channel gammas, provide a list that matches"
+            relative_img = np.power(relative_img, gammas[i])
+        else:
+            relative_img = np.power(relative_img, gammas)
+        relative_imgs.append(relative_img)
+    relative_imgs = np.stack(relative_imgs, axis=-1)
+
+    # blending (switch between method)
+    blended_img = np.zeros((r, c, n_channel_color))
+    if blending == "add":
+        # Additive mixing
+        for i in range(nc):
+            for j in range(n_channel_color):
+                channel_color = colors[i, j]
+                blended_img[..., j] += channel_color * relative_imgs[..., i]
+        blended_img = np.clip(blended_img, a_min=0, a_max=255)
+        blended_img = blended_img.astype(np.uint8)
+
+    elif blending == "max":
+        argmax = np.argmax(relative_imgs, axis=-1)
+        blended_img = np.zeros((r, c, n_channel_color))
+        for i in range(nc):
+            mask = argmax == i
+            for j in range(n_channel_color):
+                channel_color = colors[i, j]
+                blended_img[..., j][mask] = channel_color * relative_imgs[..., i][mask]
+        blended_img = blended_img.astype(np.uint8)
+
+    # Add Max projection style
+
     return blended_img
